@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Zombs Recorder Setup</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --card: #ffffff; --text: #1d1f23; --muted: #5d636e; --line: #e3e6eb;
+    --accent: #d93a3a; --accent-soft: #fdeceb; --ok: #1f8f4e; --kbd: #f0f1f4; --kbd-edge: #c9cdd4;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #16181c; --card: #1f2227; --text: #eceef1; --muted: #a3a9b4; --line: #31353c;
+            --accent: #ff6b63; --accent-soft: #3a2223; --ok: #4cc584; --kbd: #2b2f36; --kbd-edge: #4a4f58; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 17px/1.55 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif; }
+  main { max-width: 720px; margin: 0 auto; padding: 40px 16px 64px; }
+  h1 { font-size: 34px; line-height: 1.15; margin: 0 0 6px; letter-spacing: -0.02em; }
+  .lede { color: var(--muted); margin: 0 0 28px; font-size: 18px; }
+  .need { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 32px; padding: 0; list-style: none; }
+  .need li { background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 4px 14px; font-size: 15px; }
+  .step { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 22px 24px 20px 76px; margin: 0 0 16px; position: relative; }
+  .step::before { content: attr(data-n); position: absolute; left: 22px; top: 20px; width: 36px; height: 36px; border-radius: 50%;
+                  background: var(--accent); color: #fff; font-weight: 700; display: grid; place-items: center; font-size: 18px; }
+  .step h2 { margin: 4px 0 10px; font-size: 21px; }
+  .step ol, .step ul { margin: 0; padding-left: 20px; }
+  .step li { margin: 6px 0; }
+  .tip { margin-top: 12px; padding: 10px 14px; border-radius: 10px; background: var(--accent-soft); font-size: 15px; }
+  .record { border: 2px solid var(--accent); }
+  .keys { display: grid; grid-template-columns: auto 1fr; gap: 10px 14px; align-items: center; margin-top: 4px; }
+  kbd { display: inline-block; min-width: 1.9em; padding: 1px 8px; border-radius: 7px; background: var(--kbd); border: 1px solid var(--kbd-edge);
+        border-bottom-width: 3px; font: 600 17px/1.4 ui-monospace, Menlo, monospace; text-align: center; }
+  .keys kbd { font-size: 26px; padding: 2px 14px; }
+  code { font: 14px ui-monospace, Menlo, monospace; background: var(--kbd); padding: 2px 6px; border-radius: 5px; word-break: break-all; }
+  .ok { color: var(--ok); font-weight: 600; }
+  h3 { margin: 36px 0 10px; font-size: 19px; }
+  .faq { margin: 0; padding-left: 20px; }
+  .faq li { margin: 8px 0; }
+  .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Zombs Recorder</h1>
+  <p class="lede">Records the ZombsRoyale games you choose and uploads them to train a game AI. Setup takes about 3 minutes, once.</p>
+  <ul class="need">
+    <li>Mac with macOS 14 or newer</li>
+    <li>Google Chrome</li>
+    <li>ZombsRoyale in a Chrome tab</li>
+  </ul>
+
+  <section class="step" data-n="1">
+    <h2>Put the app in Applications</h2>
+    <ol>
+      <li>Double-click <b>Zombs Recorder Kit.zip</b> to unzip it (skip this if it is already a folder).</li>
+      <li>Drag <b>ZombsRecorder</b> into the <b>Applications</b> folder in the Finder sidebar.</li>
+    </ol>
+  </section>
+
+  <section class="step" data-n="2">
+    <h2>Open it (macOS asks once)</h2>
+    <ol>
+      <li>In Applications, double-click <b>ZombsRecorder</b>. macOS says it can't check the app: click <b>Done</b> (or <b>OK</b>).</li>
+      <li>Open <b>System Settings → Privacy &amp; Security</b>, scroll down, and click <b>Open Anyway</b> next to ZombsRecorder.</li>
+      <li>Enter your Mac password, then click <b>Open Anyway</b> (or <b>Open</b>) once more.</li>
+    </ol>
+    <p class="tip">This happens because the app is shared privately rather than through the App Store. Alternatively, paste this into Terminal once:<br>
+      <code>xattr -dr com.apple.quarantine /Applications/ZombsRecorder.app</code></p>
+  </section>
+
+  <section class="step" data-n="3">
+    <h2>Finish the setup window</h2>
+    <p class="muted">A <b>Zombs Recorder</b> window opens by itself.</p>
+    <ol>
+      <li><b>Screen recording:</b> click <b>Allow Screen Recording…</b>, then <b>Open System Settings</b>. Switch on <b>ZombsRecorder</b>, and click <b>Quit &amp; Reopen</b> when macOS asks. The setup window comes back; carry on there.</li>
+      <li><b>Uploads:</b> already set up <span class="ok">✓</span></li>
+      <li><b>Game area:</b> open ZombsRoyale in Chrome. In the preview, the red line should sit on the top edge of the game, just below Chrome's tabs and address bar. If it doesn't, drag the slider.</li>
+      <li>Click <b>Done</b>.</li>
+    </ol>
+  </section>
+
+  <section class="step record" data-n="4">
+    <h2>Record your games</h2>
+    <div class="keys">
+      <span class="muted">Mode</span>
+      <span>Before each game, click the record icon in the menu bar (top right of the screen) and choose <b>Mode</b> → <b>Solo</b>, <b>Duo</b> or <b>Squad</b>. The icon shows the current mode.</span>
+      <kbd>=</kbd>
+      <span><b>Start:</b> in the game, press <kbd>=</kbd> about 10 seconds before you join a match. You hear a tick, and a timer appears in the menu bar.</span>
+      <kbd>=</kbd>
+      <span><b>Stop:</b> when you are back in the main menu after the match, press <kbd>=</kbd> again. You hear a pop.</span>
+    </div>
+    <p class="tip">One game per recording. Leave the app open: it uploads each game in the background between matches, never during one.</p>
+  </section>
+
+  <h3>Good to know</h3>
+  <ul class="faq">
+    <li><kbd>=</kbd> only starts or stops recording while the ZombsRoyale tab is in front. Everywhere else it types “=” as usual.</li>
+    <li><b>Nothing happened when I pressed =?</b> Click inside the game first. A low “bonk” sound means it couldn't start: click the record icon in the menu bar to see why.</li>
+    <li>Only the game area is recorded, and only between the two presses. Chrome's tabs, address bar and bookmarks are never recorded.</li>
+    <li>Recordings shorter than 20 seconds are thrown away. Started one by mistake? Use <b>Discard this recording</b> in the menu.</li>
+    <li>If you close the game tab, or a recording runs for 45 minutes, it saves and stops by itself.</li>
+    <li>A game uses about 120 MB per minute until it has uploaded; then it is deleted from your Mac.</li>
+    <li>macOS may occasionally ask whether ZombsRecorder can keep recording your screen. Click <b>Allow</b>.</li>
+    <li>To see this guide again: record icon in the menu bar → <b>Setup guide</b>.</li>
+    <li>To remove it: record icon → <b>Quit Zombs Recorder</b>, then drag ZombsRecorder from Applications to the Bin.</li>
+  </ul>
+</main>
+</body>
+</html>
