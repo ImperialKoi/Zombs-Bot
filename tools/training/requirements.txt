@@ -1,0 +1,10 @@
+# Use Python 3.11 or 3.12 for the ML toolchain. Runtime app has no Python dependency.
+ultralytics>=8.3,<9
+coremltools>=8,<10
+# Core ML conversion fails with NumPy 2.5; ultralytics' exporter requires numpy<=2.3.5 and
+# coremltools 9.0 is tested through torch 2.7.0.
+numpy<=2.3.5
+torch==2.7.0
+torchvision==0.22.0
+# Submits training to Kaggle GPUs (tools/training/kaggle_train.py); never needed inside a kernel.
+kaggle>=2.2,<3

@@ -1,0 +1,86 @@
+{
+ "a-010611": {
+  "width": 3840,
+  "height": 1736,
+  "parts": [
+   {
+    "file": "a-010611-bottomLeft.jpg",
+    "x": 0,
+    "y": 1041
+   },
+   {
+    "file": "a-010611-bottomRight.png",
+    "x": 2764,
+    "y": 1284
+   },
+   {
+    "file": "a-010611-prompt.jpg",
+    "x": 1574,
+    "y": 1041
+   }
+  ]
+ },
+ "a-006323": {
+  "width": 3840,
+  "height": 1736,
+  "parts": [
+   {
+    "file": "a-006323-bottomLeft.jpg",
+    "x": 0,
+    "y": 1041
+   },
+   {
+    "file": "a-006323-bottomRight.png",
+    "x": 2764,
+    "y": 1284
+   },
+   {
+    "file": "a-006323-prompt.jpg",
+    "x": 1574,
+    "y": 1041
+   }
+  ]
+ },
+ "a-001235": {
+  "width": 3840,
+  "height": 1736,
+  "parts": [
+   {
+    "file": "a-001235-bottomLeft.jpg",
+    "x": 0,
+    "y": 1041
+   },
+   {
+    "file": "a-001235-bottomRight.png",
+    "x": 2764,
+    "y": 1284
+   },
+   {
+    "file": "a-001235-prompt.jpg",
+    "x": 1574,
+    "y": 1041
+   }
+  ]
+ },
+ "b-004539": {
+  "width": 2880,
+  "height": 1376,
+  "parts": [
+   {
+    "file": "b-004539-bottomLeft.jpg",
+    "x": 0,
+    "y": 825
+   },
+   {
+    "file": "b-004539-bottomRight.png",
+    "x": 2073,
+    "y": 1018
+   },
+   {
+    "file": "b-004539-prompt.jpg",
+    "x": 1180,
+    "y": 825
+   }
+  ]
+ }
+}

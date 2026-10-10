@@ -1,0 +1,12 @@
+.build/
+dist/
+.DS_Store
+.venv/
+__pycache__/
+data/
+artifacts/
+*.mlmodelc/
+*.mlpackage/
+*.pt
+*.mp4
+*.mov
