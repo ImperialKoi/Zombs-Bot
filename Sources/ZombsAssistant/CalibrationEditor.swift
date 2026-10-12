@@ -45,6 +45,9 @@ struct CalibrationEditor:View {
                     Slider(value:$draft.combat.closeCutoff,in:0.06...0.25,step:0.01) { Text(String(format:"Shotgun inside %.2f",draft.combat.closeCutoff)).frame(width:170,alignment:.leading) }
                     Slider(value:$draft.combat.longCutoff,in:0.2...0.5,step:0.01) { Text(String(format:"Sniper beyond %.2f",draft.combat.longCutoff)).frame(width:170,alignment:.leading) }
                     Slider(value:$draft.combat.switchDwell,in:0.2...2,step:0.1) { Text(String(format:"Hold a gun %.1f s",draft.combat.switchDwell)).frame(width:170,alignment:.leading) }
+                    Slider(value:$draft.combat.leadLatency,in:0...0.25,step:0.01) { Text(String(format:"Aim lead +%.0f ms",draft.combat.leadLatency*1000)).frame(width:170,alignment:.leading) }
+                    Text("Shots lead a moving opponent by the bullet's flight plus this delay. Raise it if shots trail behind opponents, lower it if they land in front.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Stepper("Keep \(draft.combat.minHealSlots) heal slots when picking up a missing gun",value:$draft.combat.minHealSlots,in:0...4)
                 }.padding(6)
             }

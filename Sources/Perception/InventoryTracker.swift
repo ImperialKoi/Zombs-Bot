@@ -6,12 +6,16 @@ import AssistantCore
 /// is learned. Items you rearrange keep their identity, and an unknown selected weapon is placed
 /// by the reserve counter its ammunition comes from.
 public final class InventoryTracker {
-    public enum Source: String, Sendable { case library, pickup, rearranged, ammunition }
+    public enum Source: String, Sendable { case library, pickup, rearranged, ammunition, hint }
     struct SlotState {
         var icon: IconFingerprint?
         var identity: ItemIdentity?
         var source: Source?
         var changedAt: Double
+        /// Whether the slot was selected when `icon` was read: the selected tile is drawn larger, with a highlight.
+        var selected = false
+        /// Since when an ammunition readout has contradicted a consumable identity on the selected slot.
+        var conflictSince: Double?
     }
     struct Change { var slot: Int; var time: Double; var icon: IconFingerprint; var prompt: InteractionPrompt? }
     public struct Learned: Sendable { public var slot: Int; public var identity: ItemIdentity; public var time: Double }
@@ -25,6 +29,11 @@ public final class InventoryTracker {
     public static let promptWindow = 1.5
     /// A pickup is learned only when no other slot changed this close to it.
     public static let isolation = 0.4
+    /// Outline similarity that still counts as the same item when a slot gains or loses the selection. Recorded tiles
+    /// keep about 0.8–0.88 across the highlight; a consumable and a gun share about 0.5.
+    public static let reselectedShape = 0.6
+    /// Seconds an ammunition readout must contradict a consumable on the selected slot before that identity is dropped.
+    public static let conflictDelay = 0.4
 
     public init(library: IconLibrary) { self.library = library }
     public func reset() { states = [:]; lastItemPrompt = nil; pending = [] }
@@ -36,26 +45,41 @@ public final class InventoryTracker {
     /// - Parameters:
     ///   - counts: printed slot numbers read for this frame's pixels (stack size or total ammunition).
     ///   - reserves: reserve counters by index (small, medium, large, shells).
+    ///   - held: the consumable the prompt panel says is in your hand ("Left Click to Consume"), if it shows one.
+    ///   - gunInHand: whether the ammunition readout shows rounds; nil when it could not be read. Defaults to `readout`.
     public func update(_ hud: HUDSnapshot, prompt: InteractionPrompt?, readout: (loaded: Int, reserve: Int)?,
-                       counts: [Int: Int], reserves: [Int: Int], time: Double) -> [InventorySlot] {
+                       counts: [Int: Int], reserves: [Int: Int], time: Double, held: ItemIdentity? = nil, gunInHand: Bool?? = nil) -> [InventorySlot] {
+        let gun: Bool? = gunInHand ?? (readout != nil ? true : nil)
         guard hud.alive, hud.slots.count == 6 else { return [] }
-        if let prompt, prompt.stable, prompt.kind != .other { lastItemPrompt = (prompt, time) }
+        // Only an item prompt can name what lands in a slot; a chest or door prompt never does.
+        if let prompt, prompt.stable, [.weapon, .healing, .throwable].contains(prompt.kind) { lastItemPrompt = (prompt, time) }
         let previous = states
         var changed: [Int] = []
         for reading in hud.slots where reading.index >= 2 {
             guard reading.occupied, let icon = reading.icon else { states[reading.index] = SlotState(changedAt: time); continue }
-            if let old = previous[reading.index], let oldIcon = old.icon, Self.sameItem(oldIcon, icon) {
-                states[reading.index]?.icon = icon // Follow gradual changes such as the selection highlight.
-                continue
+            let selected = hud.selectedSlot == reading.index
+            if let old = previous[reading.index], let oldIcon = old.icon {
+                if Self.sameItem(oldIcon, icon) {
+                    states[reading.index]?.icon = icon; states[reading.index]?.selected = selected // Follow gradual changes.
+                    continue
+                }
+                // Selecting a slot redraws its tile larger with a highlight. That is the same item, not a pickup: re-identifying
+                // it from the library turned selected potions into grenades and pistols, and an unselected hybrid into an AR.
+                if old.selected != selected, old.identity != nil, oldIcon.shapeSimilarity(icon) >= Self.reselectedShape {
+                    states[reading.index]?.icon = icon; states[reading.index]?.selected = selected
+                    continue
+                }
             }
-            var state = SlotState(icon: icon, changedAt: time)
+            var state = SlotState(icon: icon, changedAt: time, selected: selected)
             if let moved = previous.first(where: { $0.key != reading.index && $0.value.identity != nil && $0.value.icon.map { Self.sameItem($0, icon) } == true }) {
                 state.identity = moved.value.identity; state.source = .rearranged
             } else if let match = library.match(icon) {
                 state.identity = match.identity; state.source = .library
             }
             states[reading.index] = state
-            changed.append(reading.index)
+            // A tile that only gained or lost the selection never takes a prompt's name or teaches an icon.
+            let toggled = previous[reading.index].map { $0.icon != nil && $0.selected != selected } ?? false
+            if !toggled { changed.append(reading.index) }
         }
         let quiet = pending.allSatisfy { time - $0.time >= Self.isolation }
         for slot in changed {
@@ -77,6 +101,24 @@ public final class InventoryTracker {
             }
         }
         pending.removeAll { time - $0.time >= Self.isolation }
+
+        if let selected = hud.selectedSlot, selected >= 2, states[selected]?.icon != nil {
+            // An ammunition readout means a gun is in your hand: a consumable or throwable identity there is a misread. An
+            // unreadable readout (often, while you walk) neither confirms nor clears the conflict.
+            if gun == true, let kind = states[selected]?.identity?.kind, kind == .healing || kind == .throwable {
+                let since = states[selected]?.conflictSince ?? time
+                states[selected]?.conflictSince = since
+                if time - since >= Self.conflictDelay { states[selected]?.identity = nil; states[selected]?.source = nil; states[selected]?.conflictSince = nil }
+            } else if gun == false || states[selected]?.identity.map({ $0.kind != .healing && $0.kind != .throwable }) ?? true {
+                states[selected]?.conflictSince = nil
+            }
+            // The panel names the consumable in your hand. It never relabels a gun: only an unknown slot, or one whose
+            // consumable or throwable label disagrees, and never while the readout shows rounds.
+            if let held, gun != true, let state = states[selected],
+               state.identity == nil || ((state.identity!.kind == .healing || state.identity!.kind == .throwable) && state.identity!.healID != held.healID) {
+                states[selected]?.identity = held; states[selected]?.source = .hint
+            }
+        }
 
         // An unidentified selected weapon is placed by its ammunition.
         if let selected = hud.selectedSlot, selected >= 2, var state = states[selected], state.icon != nil, state.identity == nil,

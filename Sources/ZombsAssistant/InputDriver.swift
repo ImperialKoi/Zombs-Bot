@@ -8,6 +8,8 @@ final class InputDriver {
     private let lock = NSRecursiveLock()
     private let source = CGEventSource(stateID: .hidSystemState)
     private var mouseHeld = false
+    /// Interact held down at an air drop; released by any decision that does not ask for it.
+    private var interactHeld = false
     private var pressedKeys=Set<UInt16>()
     private let releaseQueue=DispatchQueue(label:"input.key-release",qos:.userInteractive)
     private var enabled = false
@@ -36,6 +38,7 @@ final class InputDriver {
         guard enabled, bindings.isValid, AXIsProcessTrusted(), CaptureService.isFocused(windowID) else { releaseAll(); return }
         let guardrail = ActionGuard(profiles: profiles, settings: settings)
         let bounds = frame.windowBounds, content = frame.contentRect
+        if interactHeld && !decision.intents.contains(where: { if case .holdOpen = $0 { return true }; return false }) { releaseInteract() }
         for intent in decision.intents {
             guard CaptureService.isFocused(windowID), guardrail.permits(intent, observation: o, now: ProcessInfo.processInfo.systemUptime, aim: aim) else { releaseAll(); return }
             switch intent {
@@ -51,7 +54,11 @@ final class InputDriver {
                 if !mouseHeld { post(CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: CGEvent(source:nil)?.location ?? .zero, mouseButton:.left)); mouseHeld = true }
             case .selectSlot(let index): releaseAll(); tap(bindings.slots[index - 1])
             case .reload: releaseAll(); tap(bindings.reload)
-            case .pickup: releaseAll(); tap(bindings.interact)
+            case .pickup, .open: releaseAll(); tap(bindings.interact)
+            case .holdOpen:
+                if !interactHeld, KeyBindings.allowed.contains(bindings.interact) {
+                    post(CGEvent(keyboardEventSource: source, virtualKey: bindings.interact, keyDown: true)); interactHeld = true
+                }
             }
         }
     }
@@ -60,7 +67,12 @@ final class InputDriver {
         if mouseHeld { post(CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: CGEvent(source:nil)?.location ?? .zero, mouseButton:.left)); mouseHeld = false }
         for key in pressedKeys { post(CGEvent(keyboardEventSource:source,virtualKey:key,keyDown:false)) }
         pressedKeys.removeAll()
+        releaseInteract()
         aim = nil
+    }
+    private func releaseInteract() {
+        lock.lock(); defer { lock.unlock() }
+        if interactHeld { post(CGEvent(keyboardEventSource: source, virtualKey: bindings.interact, keyDown: false)); interactHeld = false }
     }
     private func tap(_ key: UInt16) {
         guard KeyBindings.allowed.contains(key), !pressedKeys.contains(key) else { return }
@@ -78,7 +90,7 @@ final class InputDriver {
     }
     private func checkWatchdog() {
         lock.lock(); defer { lock.unlock() }
-        guard mouseHeld || !pressedKeys.isEmpty else { return }
+        guard mouseHeld || interactHeld || !pressedKeys.isEmpty else { return }
         guard enabled, let o = lastObservation, Policy.haltReason(o, now: ProcessInfo.processInfo.systemUptime) == nil,
               AXIsProcessTrusted(), CaptureService.isFocused(windowID) else { releaseAll(); return }
     }
@@ -142,7 +154,11 @@ final class ManualInputMonitor {
         }
         lock.lock()
         var yields = false
-        if type == .flagsChanged { option = event.flags.contains(.maskAlternate); yields = option }
+        if type == .flagsChanged {
+            option = event.flags.contains(.maskAlternate)
+            // Command or Control (Cmd-Tab, shortcuts) lets go at once, while Chrome still gets the key-up for a held E.
+            yields = option || event.flags.contains(.maskCommand) || event.flags.contains(.maskControl)
+        }
         let watched = Set(([bindings.interact,bindings.reload] + bindings.slots).map(Int64.init))
         if watched.contains(key) && [.keyDown,.keyUp].contains(type) {
             if type == .keyDown { held.insert(key) } else { held.remove(key) }

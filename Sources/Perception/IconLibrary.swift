@@ -23,7 +23,7 @@ public struct ItemIdentity: Codable, Equatable, Hashable, Sendable {
             self.init(kind: .healing, healID: id, name: prompt.name)
         case .throwable:
             self.init(kind: .throwable, name: prompt.name)
-        case .other:
+        case .chest, .other:
             return nil
         }
     }

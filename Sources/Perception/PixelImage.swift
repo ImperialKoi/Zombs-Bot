@@ -91,6 +91,48 @@ public final class PixelImage {
         return result
     }
 
+    /// Which points of a `columns` × `rows` grid over `rect` show interface text: bright, unsaturated pixels. Rows above
+    /// `split` (a fraction of the height; the item name, white) need luminance 215 and saturation up to 60. Rows below
+    /// (the subtitle, light gray) need luminance 150, saturation up to 30 and a dark glyph outline within about three
+    /// pixels: a pale floor seen through a translucent panel is as bright as the subtitle, but has no outline. The map
+    /// scrolling behind the panel while you walk therefore leaves the mask alone, and only new text changes it.
+    public func textMask(_ rect: PixelRect, columns: Int, rows: Int, split: Double = 0.53) -> [UInt8] {
+        guard rect.width >= 1, rect.height >= 1, columns > 0, rows > 0 else { return [] }
+        var mask = [UInt8](repeating: 0, count: columns * rows)
+        let reach = max(2, Int((rect.width / Double(columns)).rounded()))
+        func outlined(_ x: Int, _ y: Int) -> Bool {
+            for d in 1...reach where pixel(min(width - 1, x + d), y).luminance <= 90 || pixel(max(0, x - d), y).luminance <= 90
+                || pixel(x, min(height - 1, y + d)).luminance <= 90 || pixel(x, max(0, y - d)).luminance <= 90 { return true }
+            return false
+        }
+        for row in 0..<rows {
+            let fy = (Double(row) + 0.5) / Double(rows)
+            let name = fy < split
+            for column in 0..<columns {
+                let x = min(width - 1, max(0, Int(rect.x + rect.width * (Double(column) + 0.5) / Double(columns))))
+                let y = min(height - 1, max(0, Int(rect.y + rect.height * fy)))
+                let c = pixel(x, y)
+                let text = name ? c.luminance >= 215 && c.saturation <= 60 : c.luminance >= 150 && c.saturation <= 30 && outlined(x, y)
+                if text { mask[row * columns + column] = 1 }
+            }
+        }
+        return mask
+    }
+
+    /// A standalone copy of a region scaled up by `scale` on a border of `padding` pixels in `fill`: Vision misses most
+    /// single digits at their native size on the HUD.
+    public func cgImage(_ rect: PixelRect, scale: Int, padding: Int, fill: RGB) -> CGImage? {
+        guard scale >= 1, let source = cgImage(rect), let space = CGColorSpace(name: CGColorSpace.sRGB) else { return nil }
+        let w = source.width * scale + 2 * padding, h = source.height * scale + 2 * padding
+        guard let context = CGContext(data: nil, width: w, height: h, bitsPerComponent: 8, bytesPerRow: 0, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+        context.setFillColor(CGColor(srgbRed: CGFloat(fill.r) / 255, green: CGFloat(fill.g) / 255, blue: CGFloat(fill.b) / 255, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: w, height: h))
+        context.interpolationQuality = .high
+        context.draw(source, in: CGRect(x: padding, y: padding, width: source.width * scale, height: source.height * scale))
+        return context.makeImage()
+    }
+
     /// A standalone copy of a region, for text recognition or recording.
     public func cgImage(_ rect: PixelRect? = nil) -> CGImage? {
         let r = rect ?? PixelRect(0, 0, Double(width), Double(height))
@@ -116,4 +158,32 @@ public func fingerprintsMatch(_ a: [UInt8], _ b: [UInt8], tolerance: Int = 10) -
     guard a.count == b.count, !a.isEmpty else { return false }
     for i in a.indices where abs(Int(a[i]) - Int(b[i])) > tolerance { return false }
     return true
+}
+
+/// Overlap (intersection over union) of two text masks of `columns` per row, at the best vertical offset of up to
+/// `maxShift` rows: the prompt panel's found position jitters by a few pixels when its edges sit on busy ground.
+public func textMaskSimilarity(_ a: [UInt8], _ b: [UInt8], columns: Int, maxShift: Int = 4) -> Double {
+    guard a.count == b.count, columns > 0, !a.isEmpty, a.count % columns == 0 else { return 0 }
+    let rows = a.count / columns
+    let countA = a.reduce(0) { $0 + Int($1) }, countB = b.reduce(0) { $0 + Int($1) }
+    if countA == 0 || countB == 0 { return countA == countB ? 1 : 0 }
+    var best = 0.0
+    for shift in -min(maxShift, rows - 1)...min(maxShift, rows - 1) {
+        var both = 0
+        for row in max(0, -shift)..<min(rows, rows - shift) {
+            let ra = row * columns, rb = (row + shift) * columns
+            for column in 0..<columns where a[ra + column] != 0 && b[rb + column] != 0 { both += 1 }
+        }
+        best = max(best, Double(both) / Double(countA + countB - both))
+    }
+    return best
+}
+
+/// Prompt text masks: 128 × 32 samples, the same text at an overlap of at least 0.8. On 24 recorded matches this kept
+/// 88% of same-text frame pairs 0.2 s apart (the luminance fingerprint kept 30% while walking). On a pale indoor floor,
+/// "M4 / Rare AR" and "Bolt Mk. II Sniper / Rare Sniper" overlap 0.25; without the outline rule the floor made it 0.83.
+public enum PromptMask {
+    public static let columns = 128, rows = 32
+    public static let sameText = 0.8
+    public static func matches(_ a: [UInt8], _ b: [UInt8]) -> Bool { textMaskSimilarity(a, b, columns: columns) >= sameText }
 }

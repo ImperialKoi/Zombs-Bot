@@ -137,7 +137,7 @@ def informative(pool: list[dict], count: int, min_gap: float, score) -> list[dic
 def model_scorer(model: Path, instances: Counter):
     """Score = how unsure the model is (detections between 0.25 and 0.6) + how rare its confident classes are."""
     import cv2
-    from evaluate import core_ml_predictor, decode, letterbox
+    from evaluate import core_ml_predictor, decode, input_shape, letterbox
     manifest = json.loads((model / "model.json").read_text())
     predict = core_ml_predictor(model / manifest["modelFile"])
     rarity = {label: 1 / math.sqrt(1 + instances[label] / 25) for label in LABELS}
@@ -147,7 +147,7 @@ def model_scorer(model: Path, instances: Counter):
         key = str(row["image_path"])
         if key not in cache:
             image = cv2.cvtColor(cv2.imread(key), cv2.COLOR_BGR2RGB)
-            canvas, scale, pad_x, pad_y = letterbox(image, manifest["inputSize"])
+            canvas, scale, pad_x, pad_y = letterbox(image, input_shape(manifest))
             raw, _ = predict(canvas)
             labels, scores, _, _ = decode(raw, 0.25, len(LABELS), scale, pad_x, pad_y, image.shape[1], image.shape[0])
             unsure = sum(1 for s in scores if s < 0.6)
@@ -177,6 +177,50 @@ def by_match_round_robin(frames: list[dict]) -> list[dict]:
             if queues[match]:
                 ordered.append(queues[match].pop(0))
     return ordered
+
+
+def coarse_to_fine(pool: list[dict]) -> list[dict]:
+    """The pool reordered so that every prefix covers it evenly: middle first, then quarters, eighths, … (base-2 van der
+    Corput order). A full pass stopped anywhere has still sampled every recording from start to end."""
+    order, used, k = [], set(), 0
+    while len(order) < len(pool):
+        value, step, j = 0.0, 0.5, k
+        while j:
+            value += step * (j & 1)
+            j >>= 1
+            step /= 2
+        index = min(len(pool) - 1, int(value * len(pool)))
+        if index not in used:
+            used.add(index)
+            order.append(pool[index])
+        k += 1
+    return order
+
+
+def full_pass(root: Path, *, plan: Path | None = None, min_gap: float = 2.0, evidence: list[Path] = (),
+              first: list[dict] = ()) -> dict:
+    """Every frame at least `min_gap` apart in every recording (clear of done, in-progress and `first` frames),
+    after the `first` frames, interleaved across splits and recordings, each recording coarse to fine."""
+    sessions = load_sessions(root)
+    splits = splits_for(root, plan)
+    taken = taken_frames(sessions, list(evidence))
+    rows = {(s["matchID"], r["image"]): r for s in sessions for r in s["frames"]}
+    starts = {s["matchID"]: s["frames"][0]["timestamp"] for s in sessions}
+    head = []
+    for entry in first:
+        row = rows[(entry["matchID"], entry["image"])]
+        taken[entry["matchID"]].append(row["timestamp"])
+        head.append({"matchID": entry["matchID"], "image": entry["image"], "timeSeconds": round(row["timestamp"] - starts[entry["matchID"]], 3),
+                     "split": splits.get(entry["matchID"], "unplanned"), "reason": entry.get("reason", "carried over")})
+    groups = defaultdict(list)
+    for s in sessions:
+        split = splits.get(s["matchID"], "unplanned")
+        for row in coarse_to_fine(candidates(s, taken[s["matchID"]], min_gap, min_gap)):
+            groups[split].append({"matchID": s["matchID"], "image": row["image"], "timeSeconds": round(row["timestamp"] - starts[s["matchID"]], 3),
+                                  "split": split, "reason": "full pass"})
+    frames = interleave({k: by_match_round_robin(v) for k, v in groups.items()}, {k: len(v) for k, v in groups.items()})
+    return {"scope": f"Full annotation pass: {len(head)} carried-over frames, then every frame {min_gap:g} s apart; polygons pending",
+            "selection": {"mode": "full pass", "minGapSeconds": min_gap, "carriedOver": len(head)}, "frames": head + frames}
 
 
 def select(root: Path, count: int, *, plan: Path | None = None, shares: dict[str, float] | None = None, min_gap: float = 2.0,
@@ -223,6 +267,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("recordings", type=Path)
     parser.add_argument("--count", type=int, default=300)
+    parser.add_argument("--all", action="store_true", help="full pass: every frame --min-gap apart in every recording")
+    parser.add_argument("--carry-over", type=Path, help="with --all: put this queue's unreviewed frames first (returned ones first of all)")
     parser.add_argument("-o", "--output", type=Path, required=True)
     parser.add_argument("--model", type=Path, help="candidate folder; ranks training frames by uncertainty and class rarity")
     parser.add_argument("--split-plan", type=Path, help="default: the root's split-assignments.json or split-plan.json")
@@ -236,6 +282,21 @@ def main() -> None:
     args = parser.parse_args()
     if args.output.exists():
         raise SystemExit(f"{args.output} exists; queues are frozen once annotation starts, so choose a new name")
+    if args.all:
+        first = []
+        if args.carry_over:
+            sessions = {s["matchID"]: s for s in load_sessions(args.recordings)}
+            for entry in json.loads(args.carry_over.read_text())["frames"]:
+                row = next(r for r in sessions[entry["matchID"]]["frames"] if r["image"] == entry["image"])
+                data = json.loads(row["annotation_path"].read_text()) if row["annotation_path"].exists() else {}
+                if data.get("reviewed") is not True:
+                    first.append({**entry, "reason": "returned for fixes" if "returnedForFixes" in data else "carried over"})
+            first.sort(key=lambda e: e["reason"] != "returned for fixes")
+        queue = full_pass(args.recordings, plan=args.split_plan, min_gap=args.min_gap, evidence=args.evidence, first=first)
+        args.output.write_text(json.dumps(queue, indent=2) + "\n")
+        print(json.dumps({"queue": str(args.output), "frames": len(queue["frames"]), "carriedOver": len(first),
+                          "splits": Counter(f["split"] for f in queue["frames"])}))
+        return
     shares = {k: float(v) for k, v in (part.split("=") for part in args.shares.split(","))}
     score = None
     if args.model:

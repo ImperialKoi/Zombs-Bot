@@ -61,6 +61,16 @@ class DatasetTests(unittest.TestCase):
             self.assertEqual(len(list(output.glob("labels/*/*.txt"))), 9)
             with self.assertRaises(ValueError): export_dataset(root, output)
 
+    def test_snapshot_may_train_on_a_mode_missing_from_held_out_splits(self):
+        sessions = [dict(matchID="s0", mode="solo"), dict(matchID="s1", mode="solo"), dict(matchID="s2", mode="solo"),
+                    dict(matchID="d0", mode="duo")]
+        plan = dict(modes=["duo", "solo"], splits=dict(train=["s0", "d0"], val=["s1"], test=["s2"]))
+        with self.assertRaises(ValueError): planned_splits(sessions, plan, {"solo", "duo"})
+        splits = planned_splits(sessions, plan, {"solo", "duo"}, require_all=False, every_mode_everywhere=False)
+        self.assertEqual([s["matchID"] for s in splits["train"]], ["s0", "d0"])
+        plan["splits"] = dict(train=["s0"], val=["s1", "d0"], test=["s2"])  # A mode must still be trained on.
+        with self.assertRaises(ValueError): planned_splits(sessions, plan, {"solo", "duo"}, require_all=False, every_mode_everywhere=False)
+
     def test_all_mode_snapshot_is_still_a_pilot(self):
         import hashlib
         with tempfile.TemporaryDirectory() as tmp:

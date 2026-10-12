@@ -9,6 +9,10 @@ public final class Coordinator {
         case selection(slot: Int, settle: Double, deadline: Double)
         case pickup(name: String, before: [InventorySlot], deadline: Double)
         case reload(slot: Int, deadline: Double)
+        /// Interact was pressed at a chest; it is open once its prompt goes away.
+        case opening(name: String, deadline: Double)
+        /// Interact is held at an air drop until its prompt goes away.
+        case holding(name: String, lastSeen: Double, deadline: Double)
     }
     private struct Heal {
         var slot: Int; var item: String; var count: Int; var health: Double; var shield: Double
@@ -30,13 +34,38 @@ public final class Coordinator {
     private var lastThreat: Double?
     /// Last frame with a confirmed non-teammate player in view, even behind a wall.
     private var lastPlayerSeen = -Double.infinity
-    private var lastHealth: Double?
+    /// Recent confident health and shield readings, to tell gunfire from storm ticks and bar noise.
+    private var vitals: [(time: Double, health: Double, shield: Double)] = []
+    /// Health and shield still to arrive from doses that heal over time (hybrids), each spread evenly until `until`.
+    private var arriving: [(health: Double, shield: Double, from: Double, until: Double)] = []
+    /// Since when the HUD has been unreadable while a heal plan waits, and when the planned item has been selected
+    /// without the potion showing in hand yet.
+    private var unclearSince: Double?
+    private var inHandSince: Double?
+    /// Guns read as having no rounds at all while selected, left out of the idle choice until this time.
+    private var noAmmoUntil: [Int: Double] = [:]
+    /// When heal selections were sent since the last completed dose; a run of them means the heal never starts.
+    private var healAttempts: [Double] = []
+    private var healPausedUntil = -Double.infinity
+    /// Last frame with a target for combat; a target lost for less than `targetMemory` keeps its distance band.
+    private var lastTargetSeen = -Double.infinity
+    /// The slot this coordinator last asked for, and the last confidently read selection: a change it did not ask for is yours.
+    private var lastRequested: (slot: Int, time: Double)?
+    private var lastSelection: Int?
+    /// Until when the idle weapon leaves your own slot choice alone.
+    private var userChoiceUntil = -Double.infinity
+    /// When the idle weapon last asked for a slot; a selection that does not take is not pressed again at once.
+    private var lastIdleRequest = -Double.infinity
+    /// Why the item prompt on screen is not being picked up, for the status line.
+    private var lootNote: String?
     private var lastFrame = -Double.infinity
     private var lastShot = -Double.infinity
     private var targetID: Int?
     private var cooldownUntil = -Double.infinity
     /// Prompt names with a recent interact press, and when they may be tried again.
     private var pickupBlockedUntil: [String: Double] = [:]
+    /// Chest names with a recent interact press, and when they may be tried again.
+    private var chestBlockedUntil: [String: Double] = [:]
     private var priorWeaponSlot: Int?
     private var band: WeaponRole?
     private var lastRangeSwitch = -Double.infinity
@@ -50,10 +79,19 @@ public final class Coordinator {
     }
     public func reset() {
         pending = nil; heal = nil; healPlan = nil; recovery = nil; targetID = nil
-        lastThreat = nil; lastPlayerSeen = -.infinity; lastHealth = nil; lastFrame = -.infinity; lastShot = -.infinity
-        cooldownUntil = -.infinity; pickupBlockedUntil = [:]; priorWeaponSlot = nil
-        band = nil; lastRangeSwitch = -.infinity
+        lastThreat = nil; lastPlayerSeen = -.infinity; vitals = []; arriving = []; lastFrame = -.infinity; lastShot = -.infinity
+        unclearSince = nil; inHandSince = nil; noAmmoUntil = [:]
+        cooldownUntil = -.infinity; pickupBlockedUntil = [:]; chestBlockedUntil = [:]; priorWeaponSlot = nil
+        band = nil; lastRangeSwitch = -.infinity; lastTargetSeen = -.infinity; healAttempts = []; healPausedUntil = -.infinity
+        lastRequested = nil; lastSelection = nil; userChoiceUntil = -.infinity; lootNote = nil; lastIdleRequest = -.infinity
     }
+    /// A target missed for less than this keeps its distance band and identity.
+    static let targetMemory = 1.0
+    /// Health lost within `damageWindow` that counts as being hit. Storm ticks take a few points at a time and bar
+    /// readings agree within a fraction of a point; gunfire takes chunks, and shield first.
+    static let healthHit = 5.0, shieldHit = 1.5, damageWindow = 0.3
+    /// Heal selections without a completed dose before healing pauses, and for how long.
+    static let healAttemptLimit = 4, healPause = 8.0
     /// The distance band chosen for the current target, for diagnostics.
     public var currentBand: WeaponRole? { band }
     /// The healing item being selected or used, nil otherwise. The app asks you to stand still meanwhile.
@@ -69,6 +107,7 @@ public final class Coordinator {
     private func idle(_ t: Double, _ reason: String) -> Decision { Decision(t, [.releaseAll], reason) }
     private func select(_ slot: InventorySlot, in o: Observation, now t: Double, reason: String) -> Decision {
         pending = .selection(slot: slot.index, settle: t + (profile(slot)?.switchDelay ?? 0.2), deadline: t + 1)
+        lastRequested = (slot.index, t)
         return Decision(o.timestamp, [.releaseAll, .selectSlot(slot.index)], reason)
     }
 
@@ -105,26 +144,44 @@ public final class Coordinator {
     public func step(_ o: Observation, now t: Double) -> Decision {
         if let reason = Policy.haltReason(o, now: t) {
             pending = nil; heal = nil; healPlan = nil; recovery = nil; targetID = nil; lastThreat = t; priorWeaponSlot = nil; band = nil
+            healAttempts = []; inHandSince = nil // A halted heal did not fail.
+            // A slot you press while taking over shows as a change afterwards; a new match does not.
+            if !o.manualOverride { lastSelection = nil }
             return idle(o.timestamp, reason)
         }
         guard o.timestamp > lastFrame else { return idle(o.timestamp, "Awaiting a new frame") }
         lastFrame = o.timestamp
         if lastThreat == nil { lastThreat = t }
-        let damaged = o.hudConfidence >= 0.98 && (o.health ?? 100) < (lastHealth ?? 0) - 0.5
-        if o.hudConfidence >= 0.98 { lastHealth = o.health }
+        lootNote = nil
+        if o.selectedSlotConfidence >= 0.98, let current = o.selectedSlot {
+            if let previous = lastSelection, previous != current, !(lastRequested.map { $0.slot == current && t - $0.time <= 2 } ?? false) {
+                userChoiceUntil = t + settings.idleUserRespect
+            }
+            lastSelection = current
+        }
+        let damaged = hit(o, now: t)
         let threatened = Policy.immediateThreat(o, settings) || damaged
         if threatened { lastThreat = t }
         // A confirmed player anywhere in view delays the next heal. A real player is confirmed within a few frames;
         // counting unconfirmed one-frame detections made heals start and stop over and over.
         if Policy.playerInView(o) { lastPlayerSeen = t }
-        if threatened, case .pickup = pending {
+        if threatened {
             // A sent interaction cannot be undone; use the next observed inventory
             // for combat instead of waiting out the pickup acknowledgment timeout.
-            pending = nil; recovery = nil
+            switch pending {
+            case .pickup?: pending = nil; recovery = nil
+            case .opening?, .holding?: pending = nil
+            default: break
+            }
         }
         // Healing starts only after two seconds without a threat or a confirmed player in view.
-        let safeToHeal = !threatened && t - (lastThreat ?? t) >= 2 && t - lastPlayerSeen >= 2
+        let safeToHeal = !threatened && t - (lastThreat ?? t) >= 2 && t - lastPlayerSeen >= 2 && t >= healPausedUntil
         pickupBlockedUntil = pickupBlockedUntil.filter { $0.value > t }
+        chestBlockedUntil = chestBlockedUntil.filter { $0.value > t }
+        arriving.removeAll { t >= $0.until }
+        noAmmoUntil = noAmmoUntil.filter { $0.value > t }
+        // A gun read as out of rounds while in hand stays out of the idle choice; unselected, its rounds are never read.
+        if let slot = o.selected, profile(slot)?.kind == .weapon, slot.ammo == 0, slot.reserveAmmo == 0 { noAmmoUntil[slot.index] = t + 60 }
 
         if var r = recovery {
             // The player must return manually if the item is left behind.
@@ -134,8 +191,11 @@ public final class Coordinator {
                 r.consumed = t; recovery = r
             }
         }
+        if !features.chests, let p = pending {
+            switch p { case .opening, .holding: pending = nil; default: break } // Turning chests off lets go of E at once.
+        }
         if (heal != nil || healPlan != nil) && (!features.healing || threatened) {
-            heal = nil; healPlan = nil; pending = nil
+            heal = nil; healPlan = nil; pending = nil; healAttempts = []; inHandSince = nil
             // Fight first: combat takes the weapon that suits the opponent's range.
             if threatened, features.combat, let decision = combat(o, now: t) { priorWeaponSlot = nil; return decision }
             if let i = priorWeaponSlot, let slot = o.slot(i), profile(slot)?.kind == .weapon {
@@ -145,28 +205,46 @@ public final class Coordinator {
             return idle(o.timestamp, "Interrupt healing")
         }
         if let h = heal {
-            // Effects can hide the HUD for a frame or two; that must not cut the heal short. Half a second is too long.
-            guard let slot = o.slot(h.slot), slot.confidence >= 0.98, o.hudConfidence >= 0.98, o.selectedSlot != nil else {
-                if t - (h.uncertainSince ?? t) > 0.5 { heal = nil; healPlan = nil; return idle(o.timestamp, "Healing state became uncertain") }
+            // Effects can hide the HUD or blur the selected tile for a frame or two; that must not cut the heal short, and
+            // the potion stays held through it (an intent the input guard would refuse lets go of the mouse).
+            let slot = o.slot(h.slot)
+            let recognized = slot.map { $0.confidence >= 0.98 && profiles[$0.itemID ?? ""]?.kind == .healing || $0.isKnownEmpty } ?? false
+            guard slot != nil, o.hudConfidence >= 0.98, o.selectedSlot != nil, recognized, o.gunInHand != true else {
+                if t - (h.uncertainSince ?? t) > 0.5 {
+                    heal = nil; healPlan = nil; cooldownUntil = t + 0.3
+                    return idle(o.timestamp, o.gunInHand == true ? "A gun is in hand, not a consumable; healing stopped" : "Healing state became uncertain")
+                }
                 heal?.uncertainSince = h.uncertainSince ?? t
                 return Decision(o.timestamp, [], "Using healing item; HUD briefly unreadable")
             }
             heal?.uncertainSince = nil
-            let consumed = slot.isKnownEmpty || (slot.itemID == h.item && slot.count < h.count)
-            let improved = (o.health ?? h.health) > h.health || (o.shield ?? h.shield) > h.shield
-            if consumed && improved {
-                heal = nil; cooldownUntil = t + 0.2
-                if !slot.isKnownEmpty { recovery = nil } // Retain the remaining stack.
+            // Your own slot change ends the heal.
+            guard o.selectedSlot == h.slot || o.selectedSlotConfidence < 0.98 else {
+                heal = nil; healPlan = nil; healAttempts = []; return idle(o.timestamp, "Slot changed; healing stopped")
+            }
+            let elapsed = t - h.started
+            // Gains from an earlier hybrid keep arriving during this dose; only what this dose adds counts.
+            let earlier = arrivingTotal(at: h.started), now = arrivingTotal(at: t)
+            let gained = max(0, (o.health ?? h.health) - h.health - (earlier.health - now.health))
+                + max(0, (o.shield ?? h.shield) - h.shield - (earlier.shield - now.shield))
+            // An emptied slot means the drink is done. Otherwise, as stack counts are rarely readable, a dose is done once
+            // its drink time has passed and health or shield rose (a hybrid's gains start a moment later).
+            if slot!.isKnownEmpty || elapsed >= h.duration + 0.15 && (gained >= 1 || (slot!.count < h.count && slot!.confidence >= 0.98)) {
+                heal = nil; cooldownUntil = t + 0.2; healAttempts = []
+                if let item = profiles[h.item], item.overTime > 0 {
+                    let gain = HealPlanner.restored(item, health: min(100, h.health + earlier.health), shield: min(100, h.shield + earlier.shield))
+                    let seen = min(gained, gain.health + gain.shield)
+                    let share = gain.health + gain.shield > 0 ? gain.health / (gain.health + gain.shield) : 0.5
+                    arriving.append((max(0, gain.health - seen * share), max(0, gain.shield - seen * (1 - share)), t, t + item.overTime))
+                }
+                if !slot!.isKnownEmpty { recovery = nil } // Retain the remaining stack.
                 return idle(o.timestamp, "Healing confirmed")
             }
-            if consumed && t-h.started <= h.duration+1.5 {
-                return idle(o.timestamp,"Consumable spent; waiting for health or shield confirmation")
-            }
-            guard o.selectedSlot == h.slot, slot.itemID == h.item, t - h.started <= h.duration + 1.5 else {
+            if elapsed > h.duration + 1.5 {
                 heal = nil; healPlan = nil; recovery = nil; cooldownUntil = t + 1
-                return idle(o.timestamp, "Healing interrupted or timed out")
+                return idle(o.timestamp, "Heal did not take; stopping")
             }
-            return Decision(o.timestamp, [.useConsumable], "Using healing item")
+            return Decision(o.timestamp, [.useConsumable], "Using \(profiles[h.item]?.name ?? "healing item")")
         }
 
         if let p = pending {
@@ -192,6 +270,31 @@ public final class Coordinator {
                 if (o.slot(slot)?.ammo ?? 0) > 0 || o.selectedSlot != slot { pending = nil }
                 else if t >= deadline { pending = nil; cooldownUntil = t + 1; return idle(o.timestamp, "Reload not confirmed") }
                 else { return idle(o.timestamp, "Reloading") }
+            case let .opening(name, deadline):
+                if o.prompt?.kind != .chest || o.prompt?.name != name {
+                    // Opened (its loot or nothing is under you now), or you walked on.
+                    pending = nil; cooldownUntil = t + 0.3
+                    return idle(o.timestamp, "Chest prompt gone; \(name) opened or left behind")
+                }
+                if t >= deadline {
+                    pending = nil; chestBlockedUntil[name] = t + 3
+                    return idle(o.timestamp, "\(name) did not open; not pressing again for 3 s")
+                }
+                return idle(o.timestamp, "Opening \(name)")
+            case let .holding(name, lastSeen, deadline):
+                let showing = o.prompt?.kind == .chest && o.prompt?.name == name
+                // Hold through a frame or two without any panel. A panel showing anything else, even text not read yet
+                // (spilled loot, a door), ends the hold at once: interact must not act on it.
+                if (o.promptVisible || o.prompt != nil) && !showing || !showing && t - lastSeen > 0.5 {
+                    pending = nil; cooldownUntil = t + 0.3
+                    return idle(o.timestamp, "\(name) opened or left behind")
+                }
+                if t >= deadline {
+                    pending = nil; chestBlockedUntil[name] = t + 5
+                    return idle(o.timestamp, "\(name) did not open; not trying again for 5 s")
+                }
+                pending = .holding(name: name, lastSeen: showing ? t : lastSeen, deadline: deadline)
+                return Decision(o.timestamp, [.holdOpen(name)], "Holding interact at \(name)")
             }
         }
         // An opponent in the open is engaged at once, without waiting out a settling period.
@@ -212,43 +315,110 @@ public final class Coordinator {
             if o.selectedSlot != slotID { return select(slot, in: o, now: t, reason: "Restore weapon after healing") }
         }
         if features.loot, let decision = loot(o, now: t, safeToHeal: safeToHeal) { return decision }
+        if features.chests, let decision = openChest(o, now: t) { return decision }
         // Reload an empty selected firearm when there is a quiet opportunity.
         if features.combat, let slot = o.selected, let p = profile(slot), p.kind == .weapon,
            slot.ammo == 0, (slot.reserveAmmo ?? 0) > 0 {
             pending = .reload(slot: slot.index, deadline: t + p.reloadDuration + 1)
             return Decision(o.timestamp, [.releaseAll,.reload], "Reload empty weapon")
         }
-        return idle(o.timestamp, holdReason(o) ?? "Observing")
+        if features.combat, features.idleWeapon, let decision = idleWeapon(o, now: t) { return decision }
+        return idle(o.timestamp, holdReason(o) ?? lootNote ?? "Observing")
+    }
+
+    /// With nothing going on, carry the long-range gun: most fights start at a distance. Waits for a quiet spell and a
+    /// while after the last fight, and leaves a slot you picked yourself alone for `idleUserRespect`.
+    private func idleWeapon(_ o: Observation, now t: Double) -> Decision? {
+        guard t >= userChoiceUntil, heal == nil, healPlan == nil, o.selectedSlotConfidence >= 0.98,
+              t - (lastThreat ?? t) >= settings.idleQuiet, t - lastPlayerSeen >= settings.idleQuiet,
+              t - lastTargetSeen >= settings.idleAfterFight else { return nil }
+        let best = o.inventory.compactMap { slot -> (slot: InventorySlot, item: ItemProfile, score: Double)? in
+            guard let p = profile(slot), p.kind == .weapon, slot.hasAnyAmmo, noAmmoUntil[slot.index] == nil,
+                  let preference = Self.preference(p, band: .long) else { return nil }
+            return (slot, p, preference + Double(p.tier) * 2 + (slot.index == o.selectedSlot ? 4 : 0))
+        }.max { $0.score < $1.score }
+        guard let best, best.slot.index != o.selectedSlot, t - lastIdleRequest >= 5 else { return nil }
+        lastIdleRequest = t
+        return select(best.slot, in: o, now: t, reason: "Carry \(best.item.name) while nothing is happening")
+    }
+
+    /// Combat damage since about `damageWindow` ago: a shield hit, or a health hit too big for a storm tick.
+    private func hit(_ o: Observation, now t: Double) -> Bool {
+        guard o.hudConfidence >= 0.98, let health = o.health, let shield = o.shield else { return false }
+        // The readings of the last `damageWindow`, or the latest one before it when frames are sparse.
+        let recent = vitals.filter { t - $0.time <= Self.damageWindow }
+        let hit = (recent.isEmpty ? Array(vitals.suffix(1)) : recent).contains { $0.shield - shield > Self.shieldHit || $0.health - health >= Self.healthHit }
+        vitals = recent + [(t, health, shield)]
+        return hit
     }
 
     /// Chooses a heal in a safe gap, then carries it through. A committed heal ignores the safe-gap rule, so
     /// stray detections cannot make the assistant flip between the healing item and the gun.
     private func healing(_ o: Observation, now t: Double, safeToHeal: Bool) -> Decision? {
-        var choice: (slot: InventorySlot, item: ItemProfile)?
-        if let planned = healPlan {
-            guard o.hudConfidence >= 0.98 else { return idle(o.timestamp, "Waiting for a clear health reading") }
-            let stacks = o.inventory.filter { $0.itemID == planned && $0.count > 0 }
-            if let slot = stacks.first(where: { $0.index == o.selectedSlot }) ?? stacks.first, let item = profile(slot),
-               Policy.healingBenefit(item, in: o) > 0 {
-                choice = (slot, item)
-            } else { healPlan = nil }
-        }
-        if choice == nil && safeToHeal {
-            choice = o.inventory.compactMap { slot -> (InventorySlot, ItemProfile, Double)? in
-                guard let p = profile(slot), p.kind == .healing, slot.count > 0 else { return nil }
-                let benefit = Policy.healingBenefit(p, in: o)
-                guard benefit >= Policy.minHealingBenefit else { return nil }
-                return (slot, p, benefit / max(0.5, p.useDuration))
-            }.sorted { $0.2 > $1.2 }.first.map { ($0.0, $0.1) }
-        }
-        guard let (slot, item) = choice else { return nil }
+        if healPlan != nil {
+            guard t >= healPausedUntil else { healPlan = nil; return nil }
+            guard o.hudConfidence >= 0.98 else {
+                // A HUD that stays unreadable ends the plan rather than holding everything else up.
+                let since = unclearSince ?? t; unclearSince = since
+                if t - since > 1.5 { healPlan = nil; unclearSince = nil; return nil }
+                return idle(o.timestamp, "Waiting for a clear health reading")
+            }
+            unclearSince = nil
+        } else if !safeToHeal { return nil }
+        // Each dose follows the plan for the whole sequence, so the item may change between doses (small shields
+        // up to 50 shield, then a hybrid); the plan ends when no dose is worth its item.
+        guard let (slot, item) = nextDose(o, now: t, continuing: healPlan != nil) else { healPlan = nil; inHandSince = nil; return nil }
         healPlan = item.id
-        if o.selectedSlot != slot.index || o.selectedSlotConfidence < 0.98 {
+        let selected = o.selectedSlot == slot.index && o.selectedSlotConfidence >= 0.98
+        // Clicking with a gun in hand would fire it: a dose starts only once the panel names the potion in hand or the
+        // ammunition readout is seen empty, which over the moving map mostly means once you stand still.
+        let confirmed = o.gunInHand == false || o.heldConsumable == item.id
+        if selected && !confirmed {
+            let since = inHandSince ?? t; inHandSince = since
+            if o.gunInHand == true && t - since > 0.3 || t - since > 5 {
+                healPlan = nil; inHandSince = nil; cooldownUntil = t + 1
+                return idle(o.timestamp, o.gunInHand == true ? "That slot holds a gun, not \(item.name); not healing" : "\(item.name) not confirmed in hand; not healing")
+            }
+            return idle(o.timestamp, "Stand still: checking that \(item.name) is in hand")
+        }
+        // Selections or drinks that never complete a dose (a misread slot, a heal the game refuses) must not loop.
+        healAttempts = healAttempts.filter { t - $0 < 30 } + [t]
+        if healAttempts.count > Self.healAttemptLimit {
+            healAttempts = []; healPlan = nil; inHandSince = nil; healPausedUntil = t + Self.healPause
+            return idle(o.timestamp, "Healing keeps failing to start; pausing heals for \(Int(Self.healPause)) s")
+        }
+        inHandSince = nil
+        if !selected {
             if let current = o.selected, profile(current)?.kind == .weapon { priorWeaponSlot = current.index }
             return select(slot, in: o, now: t, reason: "Select \(item.name) to heal")
         }
         heal = Heal(slot: slot.index, item: item.id, count: slot.count, health: o.health ?? 0, shield: o.shield ?? 0, started: t, duration: item.useDuration)
-        return Decision(o.timestamp, [.releaseAll,.useConsumable], "Start healing during a safe gap")
+        return Decision(o.timestamp, [.releaseAll,.useConsumable], "Start healing with \(item.name)")
+    }
+
+    /// Health and shield still to arrive at `t` from hybrids already drunk.
+    private func arrivingTotal(at t: Double) -> (health: Double, shield: Double) {
+        arriving.reduce((0, 0)) { total, a in
+            let left = a.until > a.from ? max(0, min(1, (a.until - t) / (a.until - a.from))) : 0
+            return (total.0 + a.health * left, total.1 + a.shield * left)
+        }
+    }
+
+    /// The first dose of the best heal plan, with the slot holding it: the selected slot when it holds that item.
+    /// Health and shield still arriving from a hybrid count as restored already.
+    func nextDose(_ o: Observation, now t: Double, continuing: Bool = false) -> (slot: InventorySlot, item: ItemProfile)? {
+        guard o.hudConfidence >= 0.98, var health = o.health, var shield = o.shield else { return nil }
+        let coming = arrivingTotal(at: t)
+        health = min(100, health + coming.health); shield = min(100, shield + coming.shield)
+        let held = o.inventory.compactMap { slot -> (slot: InventorySlot, item: ItemProfile)? in
+            guard let p = profile(slot), p.kind == .healing, slot.count > 0 else { return nil }
+            return (slot, p)
+        }
+        let stacks = held.map { HealPlanner.Stack($0.item, count: $0.slot.count) }
+        let thresholds = continuing ? HealPlanner.continuing : (Policy.minHealingBenefit, 0)
+        guard let first = HealPlanner.plan(health: health, shield: shield, stacks: stacks, minimumBenefit: thresholds.0, slack: thresholds.1).first else { return nil }
+        let holding = held.filter { $0.item.id == first.id }
+        return holding.first { $0.slot.index == o.selectedSlot } ?? holding.first
     }
 
     /// Why players in view are not engaged, for the status line.
@@ -275,10 +445,18 @@ public final class Coordinator {
     private func combat(_ o: Observation, now t: Double) -> Decision? {
         let targets = o.players.filter { Policy.validEnemy($0, settings) && Policy.canFireToward(o, at: $0.position) }
             .sorted { $0.position.distance(to: o.player, aspect: o.aspect) < $1.position.distance(to: o.player, aspect: o.aspect) }
-        guard var target = targets.first else { targetID = nil; band = nil; return nil }
+        guard var target = targets.first else {
+            // A target missed briefly keeps its band, so its return does not count as a new range.
+            if t - lastTargetSeen > Self.targetMemory { targetID = nil; band = nil }
+            return nil
+        }
+        lastTargetSeen = t
         if let old = targets.first(where: { $0.id == targetID }), old.position.distance(to: o.player, aspect: o.aspect) < target.position.distance(to: o.player, aspect: o.aspect) * 1.5 { target = old }
         targetID = target.id
-        let distance = target.position.distance(to: o.player, aspect: o.aspect)
+        // Distances are in the default view's widths: a sniper zooms out, which shrinks everything on screen, and an
+        // opponent must not look closer just because the sniper is in hand.
+        let zoom = o.selected.flatMap { profile($0) }?.zoom ?? 1
+        let distance = target.position.distance(to: o.player, aspect: o.aspect) * zoom
         let band = band(for: distance)
         self.band = band
         let armed = o.inventory.compactMap { slot -> (InventorySlot, ItemProfile)? in
@@ -318,7 +496,7 @@ public final class Coordinator {
             return Decision(o.timestamp, [.releaseAll,.reload], "Reload selected weapon")
         }
         guard target.motion != nil else { return idle(o.timestamp, "Opponent motion unknown") }
-        if distance > p.maxRange {
+        if target.position.distance(to: o.player, aspect: o.aspect) * p.zoom > p.maxRange {
             return Decision(o.timestamp, [.releaseAll, .aim(target.position)], "Opponent beyond \(p.name) range; tracking")
         }
         guard let intercept = Targeting.intercept(target, in: o, weapon: p, now: t, settings: settings) else {
@@ -346,21 +524,35 @@ public final class Coordinator {
         return Decision(o.timestamp, [.releaseAll, .pickup(prompt.name)], "Pick up \(prompt.name) (\(prompt.subtitle)); awaiting inventory confirmation")
     }
 
+    /// Presses interact once at a chest or crate; its loot then lies around it, where the item prompts take over.
+    /// An air drop opens after about 5 s at it, so interact is held until its prompt goes away, for up to 8 s.
+    private func openChest(_ o: Observation, now t: Double) -> Decision? {
+        guard let prompt = Policy.chestPrompt(o), chestBlockedUntil[prompt.name] == nil else { return nil }
+        chestBlockedUntil[prompt.name] = t + 2.5
+        if Policy.chestNeedsHold(prompt) {
+            pending = .holding(name: prompt.name, lastSeen: t, deadline: t + 8)
+            return Decision(o.timestamp, [.releaseAll, .holdOpen(prompt.name)], "Hold interact at \(prompt.name); stand still")
+        }
+        pending = .opening(name: prompt.name, deadline: t + 1.5)
+        return Decision(o.timestamp, [.releaseAll, .open(prompt.name)], "Open \(prompt.name)")
+    }
+
     private func loot(_ o: Observation, now t: Double, safeToHeal: Bool) -> Decision? {
-        guard let prompt = Policy.pickupPrompt(o), pickupBlockedUntil[prompt.name] == nil,
-              let id = prompt.itemID, let incoming = profiles[id], incoming.verified else { return nil }
+        guard let prompt = Policy.pickupPrompt(o), let id = prompt.itemID, let incoming = profiles[id], incoming.verified else { return nil }
+        func skip(_ why: String) -> Decision? { lootNote = "Not picking up \(prompt.name): \(why)"; return nil }
+        guard pickupBlockedUntil[prompt.name] == nil else { return skip("just tried") }
         let slots = o.inventory.filter { (2...6).contains($0.index) }
-        guard slots.count == 5 else { return nil }
+        guard slots.count == 5 else { return skip("inventory not fully read") }
         let empty = slots.filter(\.isKnownEmpty)
         let weapons = slots.filter { profile($0).map { $0.kind == .weapon && $0.role != nil } ?? false }
         let heals = slots.filter { profile($0)?.kind == .healing }
         let missingRoles = WeaponRole.allCases.filter { role in !weapons.contains { profile($0)?.role == role } }
         switch incoming.kind {
         case .weapon:
-            guard let role = incoming.role else { return nil } // Launchers and special weapons stay manual.
+            guard let role = incoming.role else { return skip("launchers and special weapons stay manual") }
             let sameRole = weapons.filter { profile($0)?.role == role }
             if let worst = sameRole.min(by: { Self.value(profile($0)!) < Self.value(profile($1)!) }) {
-                guard Self.value(incoming) > Self.value(profile(worst)!) + 0.5 else { return nil }
+                guard Self.value(incoming) > Self.value(profile(worst)!) + 0.5 else { return skip("not better than \(profile(worst)!.name)") }
                 return pickup(prompt, replacing: empty.isEmpty ? worst : nil, in: o, now: t)
             }
             if !empty.isEmpty { return pickup(prompt, replacing: nil, in: o, now: t) }
@@ -373,7 +565,7 @@ public final class Coordinator {
                let victim = heals.min(by: { Policy.healingBenefit(profile($0)!, in: o) < Policy.healingBenefit(profile($1)!, in: o) }) {
                 return pickup(prompt, replacing: victim, in: o, now: t)
             }
-            return nil
+            return skip(slots.contains { $0.confidence < 0.98 } ? "inventory full and some slots unrecognized" : "inventory full")
         case .healing:
             if heals.contains(where: { $0.itemID == id }) { return pickup(prompt, replacing: nil, in: o, now: t) } // Stacks.
             // Keep enough free slots for the weapon roles still missing.
@@ -385,7 +577,7 @@ public final class Coordinator {
                 if recovery == nil { recovery = Recovery(slot: slot.index, weapon: weapon, consumable: id, created: t) }
                 return pickup(prompt, replacing: slot, in: o, now: t)
             }
-            return nil
+            return skip(empty.isEmpty ? "inventory full" : "keeping free slots for missing guns")
         default:
             return nil
         }

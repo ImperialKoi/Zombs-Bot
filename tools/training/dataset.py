@@ -70,8 +70,9 @@ def split_sessions(sessions: list[dict], seed: int = 42, modes=None) -> dict[str
 
 
 def planned_splits(sessions: list[dict], plan: dict, modes: set[str],
-                   require_all: bool = True) -> dict[str, list[dict]]:
-    """Apply frozen assignments. require_all=False lets an interim pilot omit unreviewed matches."""
+                   require_all: bool = True, every_mode_everywhere: bool = True) -> dict[str, list[dict]]:
+    """Apply frozen assignments. require_all=False lets an interim pilot omit unreviewed matches;
+    every_mode_everywhere=False lets it train on a mode that validation and test do not have yet."""
     if set(plan.get("modes", [])) != modes or set(plan.get("splits", {})) != {"train", "val", "test"}:
         raise ValueError("Split plan modes or split names do not match")
     ids = [i for group in plan["splits"].values() for i in group]
@@ -81,8 +82,10 @@ def planned_splits(sessions: list[dict], plan: dict, modes: set[str],
     if set(lookup) - set(ids) or (require_all and set(ids) != set(lookup)):
         raise ValueError("Every planned match must have reviewed frames; no unplanned matches may be exported")
     result = {name: [lookup[i] for i in ids if i in lookup] for name, ids in plan["splits"].items()}
-    if any({s["mode"] for s in group} != modes for group in result.values()):
+    if every_mode_everywhere and any({s["mode"] for s in group} != modes for group in result.values()):
         raise ValueError("Each split must cover every requested mode")
+    if {s["mode"] for s in result["train"]} != modes or not all(result.values()):
+        raise ValueError("Training must cover every requested mode, and every split needs reviewed frames")
     return result
 
 
@@ -123,7 +126,8 @@ def export_dataset(recordings: Path, output: Path, modes=None, split_plan: Path 
         if frames:
             usable.append({**session, "annotated": frames})
     plan = json.loads(split_plan.read_text()) if split_plan else None
-    splits = planned_splits(usable, plan, modes, require_all=not reviewed_snapshot) if plan else split_sessions(usable, modes=modes)
+    splits = (planned_splits(usable, plan, modes, require_all=not reviewed_snapshot, every_mode_everywhere=not reviewed_snapshot)
+              if plan else split_sessions(usable, modes=modes))
     if output.exists() and any(output.iterdir()):
         raise ValueError("Choose an empty output directory to avoid stale split leakage")
     report = {"labels": LABELS, "modes": sorted(modes), "scope": "release" if modes == MODES and not reviewed_snapshot else "pilot",
@@ -134,6 +138,8 @@ def export_dataset(recordings: Path, output: Path, modes=None, split_plan: Path 
     if reviewed_snapshot:
         exported = {s["matchID"] for s in usable}
         report["unreviewedPlannedMatches"] = {name: [i for i in ids if i not in exported] for name, ids in plan["splits"].items()}
+        report["modesMissingFromSplits"] = {name: sorted(modes - {s["mode"] for s in group}) for name, group in splits.items()
+                                            if modes - {s["mode"] for s in group}}
         report["pendingAnnotationFiles"] = pending
     manifest = []
     for name, group in splits.items():

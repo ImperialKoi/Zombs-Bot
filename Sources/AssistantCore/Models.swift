@@ -28,11 +28,18 @@ public struct ItemProfile: Codable, Equatable, Sendable {
     public var healthCap: Double = 100
     public var shieldCap: Double = 100
     public var useDuration: Double = 0
+    /// Health/shield points a consumable is worth keeping for later; a dose must restore more than this to be used.
+    public var keepValue: Double = 0
+    /// Seconds over which a consumable's gains arrive after the drink; 0 means at once.
+    public var overTime: Double = 0
     public var weaponClass: WeaponClass?
     public var rarity: Rarity?
     /// Fire only above this estimated hit chance; nil uses `Policy.minHitProbability`.
     public var minHitProbability: Double?
     public var ammo: AmmoFamily?
+    /// How much more of the map the view shows while this weapon is in hand: snipers zoom out about 1.2×. Screen
+    /// distances times this are in the default view's widths, the unit of `maxRange` and the distance bands.
+    public var zoom: Double = 1
     public init(id: String, name: String, kind: ItemKind, role: WeaponRole? = nil) {
         self.id = id; self.name = name; self.kind = kind; self.role = role
     }
@@ -55,15 +62,18 @@ public struct ItemProfile: Codable, Equatable, Sendable {
         healthCap = try c.decodeIfPresent(Double.self, forKey: .healthCap) ?? 100
         shieldCap = try c.decodeIfPresent(Double.self, forKey: .shieldCap) ?? 100
         useDuration = try c.decodeIfPresent(Double.self, forKey: .useDuration) ?? 0
+        keepValue = try c.decodeIfPresent(Double.self, forKey: .keepValue) ?? 0
+        overTime = try c.decodeIfPresent(Double.self, forKey: .overTime) ?? 0
         weaponClass = try c.decodeIfPresent(WeaponClass.self, forKey: .weaponClass)
         rarity = try c.decodeIfPresent(Rarity.self, forKey: .rarity)
         minHitProbability = try c.decodeIfPresent(Double.self, forKey: .minHitProbability)
         ammo = try c.decodeIfPresent(AmmoFamily.self, forKey: .ammo)
+        zoom = try c.decodeIfPresent(Double.self, forKey: .zoom) ?? 1
     }
     public var isValid: Bool {
-        !id.isEmpty && [shotInterval,reloadDuration,switchDelay,projectileSpeed,minRange,maxRange,healthGain,shieldGain,healthCap,shieldCap,useDuration].allSatisfy { $0.isFinite && $0 >= 0 }
+        !id.isEmpty && [shotInterval,reloadDuration,switchDelay,projectileSpeed,minRange,maxRange,healthGain,shieldGain,healthCap,shieldCap,useDuration,keepValue,overTime].allSatisfy { $0.isFinite && $0 >= 0 }
         && shotInterval >= 0.03 && switchDelay >= 0.05 && maxRange >= minRange && healthCap <= 100 && shieldCap <= 100
-        && (minHitProbability.map { $0.isFinite && $0 > 0 && $0 <= 1 } ?? true)
+        && (minHitProbability.map { $0.isFinite && $0 > 0 && $0 <= 1 } ?? true) && zoom.isFinite && (0.5...3).contains(zoom)
     }
 }
 
@@ -161,7 +171,8 @@ public struct Obstacle: Codable, Equatable, Sendable {
 /// The interaction panel below your character. It names what the interact key will do,
 /// e.g. "M4 / Rare AR", "Hybrid Potion / Healing" or "Gold Chest / Interact".
 public struct InteractionPrompt: Codable, Equatable, Sendable {
-    public enum Kind: String, Codable, Sendable { case weapon, healing, throwable, other }
+    /// `chest`: a chest or crate the interact key opens. `other`: doors, vehicles, revives and anything unrecognized.
+    public enum Kind: String, Codable, Sendable { case weapon, healing, throwable, chest, other }
     public var name: String
     public var subtitle: String
     public var kind: Kind
@@ -203,6 +214,12 @@ public struct Observation: Codable, Equatable, Sendable {
     public var players: [PlayerTrack] = []
     public var obstacles: [Obstacle] = []
     public var prompt: InteractionPrompt?
+    /// The consumable the prompt panel says is in your hand ("Left Click to Consume"), when it shows that hint.
+    public var heldConsumable: String?
+    /// The interaction panel is on screen, whether or not its text has been read (`prompt` is nil until it is).
+    public var promptVisible: Bool = false
+    /// True when the ammunition readout shows rounds (a gun is in hand), false when it was read and shows none, nil when unknown.
+    public var gunInHand: Bool?
     public var healingProgress: Double?
     public var manualOverride: Bool = false
     public var captureHealthy: Bool = true
@@ -228,6 +245,9 @@ public struct Observation: Codable, Equatable, Sendable {
         players = try c.decodeIfPresent([PlayerTrack].self, forKey: .players) ?? []
         obstacles = try c.decodeIfPresent([Obstacle].self, forKey: .obstacles) ?? []
         prompt = try c.decodeIfPresent(InteractionPrompt.self, forKey: .prompt)
+        heldConsumable = try c.decodeIfPresent(String.self, forKey: .heldConsumable)
+        promptVisible = try c.decodeIfPresent(Bool.self, forKey: .promptVisible) ?? (prompt != nil)
+        gunInHand = try c.decodeIfPresent(Bool.self, forKey: .gunInHand)
         healingProgress = try c.decodeIfPresent(Double.self, forKey: .healingProgress)
         manualOverride = try c.decodeIfPresent(Bool.self, forKey: .manualOverride) ?? false
         captureHealthy = try c.decodeIfPresent(Bool.self, forKey: .captureHealthy) ?? true
@@ -238,6 +258,10 @@ public struct Observation: Codable, Equatable, Sendable {
 
 public struct Features: Codable, Equatable, Sendable {
     public var combat = true; public var loot = true; public var healing = true
+    /// Press interact at chests and crates.
+    public var chests = true
+    /// Carry the long-range gun while nothing is happening.
+    public var idleWeapon = true
     public init() {}
 }
 
@@ -250,6 +274,10 @@ public enum InputIntent: Codable, Equatable, Sendable {
     case reload
     /// Press interact once for the item the prompt names.
     case pickup(String)
+    /// Press interact once to open the chest or crate the prompt names.
+    case open(String)
+    /// Hold interact at a chest that takes several seconds to open (an air drop); any decision without it lets go.
+    case holdOpen(String)
     case releaseAll
 }
 

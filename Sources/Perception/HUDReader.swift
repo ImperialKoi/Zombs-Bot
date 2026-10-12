@@ -50,6 +50,7 @@ public struct HUDSnapshot: Sendable {
     public var promptVisible: Bool
     /// Where the panel was found: its expected place, shifted vertically when the game area is cropped slightly off.
     public var promptRect: PixelRect?
+    /// The panel's text as a `PromptMask`, which stays put while the map scrolls behind the translucent panel.
     public var promptFingerprint: [UInt8]
     public var readoutFingerprint: [UInt8]
     public var reserveFingerprints: [[UInt8]]
@@ -78,7 +79,8 @@ public enum HUDReader {
             snapshot.promptVisible = true
             snapshot.promptRect = PixelRect(layout.prompt.x, layout.prompt.y + shift, layout.prompt.width, layout.prompt.height)
             let text = layout.promptText
-            snapshot.promptFingerprint = image.fingerprint(PixelRect(text.x, text.y + shift, text.width, text.height), columns: 24, rows: 6)
+            snapshot.promptFingerprint = image.textMask(PixelRect(text.x, text.y + shift, text.width, text.height),
+                                                        columns: PromptMask.columns, rows: PromptMask.rows)
         }
         snapshot.readoutFingerprint = image.fingerprint(layout.readout, columns: 20, rows: 4)
         snapshot.reserveFingerprints = (0..<4).map { image.fingerprint(layout.reserveCounter($0), columns: 8, rows: 3) }

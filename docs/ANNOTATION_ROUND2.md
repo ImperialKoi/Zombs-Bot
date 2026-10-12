@@ -1,5 +1,7 @@
 # Annotation round 2 — October 7, 2026
 
+> **Superseded on 2026-10-12** by the [annotations guide](ANNOTATIONS_GUIDE.md) and the full-pass queue (`data/recorder-corpus/full-pass-queue.json`). The tools described below are unchanged.
+
 Round 2 adds the ZombsRecorder footage, model drafts and box-to-outline, and replaces the dense Solo pilot queue as the working queue. Train the next model on Kaggle once round 2 is done.
 
 ## Review checkpoint — October 8, 2026

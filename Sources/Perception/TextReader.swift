@@ -60,17 +60,27 @@ public final class TextReader: @unchecked Sendable {
         return results[region]
     }
 
+    /// Whether two fingerprints show the same text; by default no cell may differ by more than 12 levels.
+    public typealias Matcher = ([UInt8], [UInt8]) -> Bool
+    public static func luminance(_ a: [UInt8], _ b: [UInt8]) -> Bool { fingerprintsMatch(a, b, tolerance: 12) }
+
     /// The latest result, only when it was read from pixels matching `fingerprint`.
-    public func current(_ region: TextRegion, fingerprint: [UInt8], tolerance: Int = 12) -> TextResult? {
-        guard let result = result(region), fingerprintsMatch(result.fingerprint, fingerprint, tolerance: tolerance) else { return nil }
+    public func current(_ region: TextRegion, fingerprint: [UInt8], matches: Matcher = luminance) -> TextResult? {
+        guard let result = result(region), matches(result.fingerprint, fingerprint) else { return nil }
         return result
     }
 
     /// Queues a read unless these pixels were read already. The newest image for a region replaces an older waiting one.
-    public func request(_ region: TextRegion, fingerprint: [UInt8], time: Double, image: () -> CGImage?) {
+    /// `fresh` decides that a result still describes the pixels well enough to skip reading them again; a read that found
+    /// no text is tried again after `retryEmpty` seconds, if given. Reads are expensive next to the game, so only the
+    /// prompt retries: an empty prompt read would otherwise stand while you stand still.
+    public func request(_ region: TextRegion, fingerprint: [UInt8], time: Double, fresh: Matcher = luminance, retryEmpty: Double? = nil,
+                        image: () -> CGImage?) {
         guard !fingerprint.isEmpty else { return }
         lock.lock()
-        if let done = results[region], fingerprintsMatch(done.fingerprint, fingerprint, tolerance: 12) { lock.unlock(); return }
+        if let done = results[region], fresh(done.fingerprint, fingerprint), !done.lines.isEmpty || retryEmpty.map({ time - done.time < $0 }) ?? true {
+            lock.unlock(); return
+        }
         if !synchronous, let last = lastRequest[region], time - last < minimumInterval, waiting[region] == nil { lock.unlock(); return }
         lastRequest[region] = time
         lock.unlock()

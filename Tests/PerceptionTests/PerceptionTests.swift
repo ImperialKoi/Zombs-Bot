@@ -237,6 +237,100 @@ struct PerceptionTests {
         #expect(slots[2].itemID == "sniper:epic" && slots[2].confidence >= 0.98 && slots[2].ammo == 5)
     }
 
+    /// The same icon as drawn on a selected tile: larger, with a highlight, so its outline matches only partly.
+    func highlighted(_ base: IconFingerprint, _ seed: Int = 50) -> IconFingerprint {
+        let other = icon(seed)
+        var outline = zip(base.outline, other.outline).map { 0.55 * $0 + 0.45 * $1 }
+        let norm = outline.reduce(0) { $0 + $1 * $1 }.squareRoot(); outline = outline.map { $0 / norm }
+        return IconFingerprint(outline: outline, colors: base.colors)
+    }
+    let smallShield = ItemIdentity(kind: .healing, healID: "small_shield", name: "Small Shield")
+
+    @Test func testSelectionHighlightKeepsTheSlotIdentityAndTeachesNothing() {
+        let plain = icon(3, hue: 7), lit = highlighted(plain)
+        #expect(plain.shapeSimilarity(lit) >= InventoryTracker.reselectedShape && plain.shapeSimilarity(lit) < 0.9)
+        // A polluted library: the selected potion was once learned as a grenade.
+        let library = IconLibrary(entries: [IconEntry(identity: smallShield, fingerprint: plain, samples: 3),
+                                            IconEntry(identity: ItemIdentity(kind: .throwable, name: "Frag Grenade"), fingerprint: lit, samples: 1)])
+        let tracker = InventoryTracker(library: library)
+        let unselected = tracker.update(snapshot([3: (plain, nil)], selected: 2), prompt: nil, readout: nil, counts: [:], reserves: [:], time: 0)
+        #expect(unselected[2].itemID == "small_shield")
+        let selected = tracker.update(snapshot([3: (lit, nil)], selected: 3), prompt: m4, readout: nil, counts: [:], reserves: [:], time: 0.2)
+        #expect(selected[2].itemID == "small_shield") // Not a grenade, and not the M4 on the ground.
+        let back = tracker.update(snapshot([3: (plain, nil)], selected: 2), prompt: nil, readout: nil, counts: [:], reserves: [:], time: 0.4)
+        #expect(back[2].itemID == "small_shield")
+        _ = tracker.update(snapshot([3: (plain, nil)], selected: 2), prompt: nil, readout: nil, counts: [:], reserves: [:], time: 1.2)
+        #expect(library.entries.count == 2 && tracker.learned.isEmpty)
+        // An unknown item that only gains the selection right after a prompt is not named by that prompt either.
+        let fresh = InventoryTracker(library: IconLibrary(entries: []))
+        _ = fresh.update(snapshot([4: (icon(8), nil)], selected: 2), prompt: nil, readout: nil, counts: [:], reserves: [:], time: 0)
+        let named = fresh.update(snapshot([4: (highlighted(icon(8)), nil)], selected: 4), prompt: m4, readout: nil, counts: [:], reserves: [:], time: 0.2)
+        _ = fresh.update(snapshot([4: (highlighted(icon(8)), nil)], selected: 4), prompt: nil, readout: nil, counts: [:], reserves: [:], time: 0.9)
+        #expect(named[3].itemID == nil && fresh.learned.isEmpty)
+    }
+
+    @Test func testAmmunitionReadoutOverrulesAConsumableOnTheSelectedSlot() {
+        let gun = icon(11, hue: 2)
+        let library = IconLibrary(entries: [IconEntry(identity: ItemIdentity(kind: .healing, healID: "large_shield", name: "Big Shield"), fingerprint: gun, samples: 1)])
+        let tracker = InventoryTracker(library: library)
+        let reserves = [0: 822, 1: 1042, 2: 348, 3: 95]
+        let first = tracker.update(snapshot([4: (gun, .legendary)], selected: 4), prompt: nil, readout: (6, 348), counts: [:], reserves: reserves, time: 0)
+        #expect(first[3].itemID == "large_shield") // One readout is not enough.
+        let later = tracker.update(snapshot([4: (gun, .legendary)], selected: 4), prompt: nil, readout: (6, 348), counts: [:], reserves: reserves, time: 0.5)
+        #expect(later[3].itemID == "sniper:legendary" && later[3].ammo == 6) // Placed by its ammunition instead.
+    }
+
+    @Test func testConsumableHintNamesTheSelectedSlot() {
+        let tracker = InventoryTracker(library: IconLibrary(entries: []))
+        let unknown = tracker.update(snapshot([3: (icon(4), nil)], selected: 3), prompt: nil, readout: nil, counts: [:], reserves: [:], time: 0)
+        #expect(unknown[2].itemID == nil)
+        let named = tracker.update(snapshot([3: (icon(4), nil)], selected: 3), prompt: nil, readout: nil, counts: [:], reserves: [:], time: 0.1, held: smallShield)
+        #expect(named[2].itemID == "small_shield" && tracker.source(of: 3) == .hint)
+        // An ammunition readout wins over a stale hint.
+        let gun = tracker.update(snapshot([4: (icon(6), .rare)], selected: 4), prompt: nil, readout: (20, 90), counts: [:], reserves: [:], time: 0.2, held: smallShield)
+        #expect(gun[3].itemID != "small_shield")
+    }
+
+    /// A 200 × 60 image: rows 0–29 the name band, 30–59 the subtitle band, both on a pale floor (luminance about 165).
+    func panel(subtitle box: (x: Int, w: Int)?, floor: UInt8 = 165) -> PixelImage {
+        let w = 200, h = 60
+        var bytes = [UInt8](repeating: 0, count: w * h * 4)
+        for y in 0..<h { for x in 0..<w {
+            var v = floor
+            if let box, y >= 38 && y < 52 && x >= box.x - 3 && x < box.x + box.w + 3 {
+                // Light-gray subtitle glyphs with a dark outline, as the game draws them.
+                v = (y >= 41 && y < 49 && x >= box.x && x < box.x + box.w) ? 185 : 30
+            }
+            let i = (y * w + x) * 4; bytes[i] = v; bytes[i + 1] = v; bytes[i + 2] = v; bytes[i + 3] = 255
+        } }
+        let space = CGColorSpace(name: CGColorSpace.sRGB)!
+        let context = CGContext(data: &bytes, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4, space: space,
+                                bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue)!
+        return PixelImage(cgImage: context.makeImage()!)!
+    }
+    @Test func testPaleFloorBehindThePanelIsNotText() {
+        let rect = PixelRect(0, 0, 200, 60)
+        let empty = panel(subtitle: nil).textMask(rect, columns: 64, rows: 16)
+        #expect(empty.allSatisfy { $0 == 0 }) // The floor is as bright as subtitle text, but has no outline.
+        let a = panel(subtitle: (20, 60)).textMask(rect, columns: 64, rows: 16)
+        let b = panel(subtitle: (110, 60)).textMask(rect, columns: 64, rows: 16)
+        #expect(a.contains(1) && textMaskSimilarity(a, b, columns: 64) < 0.2)
+        #expect(textMaskSimilarity(a, panel(subtitle: (20, 60), floor: 150).textMask(rect, columns: 64, rows: 16), columns: 64) == 1)
+    }
+
+    @Test func testPromptTextMasksIgnoreRowJitterButNotNewText() {
+        let columns = 8
+        func mask(_ rows: [String]) -> [UInt8] { rows.flatMap { $0.map { $0 == "#" ? UInt8(1) : 0 } } }
+        let text = mask(["........", ".##.#...", ".#..##..", "........", "..###...", "........"])
+        let lower = mask(["........", "........", ".##.#...", ".#..##..", "........", "..###..."])
+        let other = mask(["........", ".#..##..", ".##.#...", "........", "...###..", "........"])
+        #expect(textMaskSimilarity(text, text, columns: columns) == 1)
+        #expect(textMaskSimilarity(text, lower, columns: columns) == 1)
+        #expect(textMaskSimilarity(text, other, columns: columns) < PromptMask.sameText)
+        #expect(textMaskSimilarity(mask(["........"]), mask(["........"]), columns: columns) == 1)
+        #expect(textMaskSimilarity(text, mask(Array(repeating: "........", count: 6)), columns: columns) == 0)
+    }
+
     @Test func testIconLibraryRefusesToRelabelAKnownIcon() {
         let library = IconLibrary(entries: [])
         #expect(library.learn(ItemIdentity(kind: .weapon, weaponClass: .ar, name: "M4"), icon(1)))

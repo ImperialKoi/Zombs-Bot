@@ -34,6 +34,8 @@ None of the other tools download or upload media.
 
 ## 2. Review annotations locally
 
+**Annotators: follow the [annotations guide](ANNOTATIONS_GUIDE.md).** It holds the class rules below plus every later confirmation, the workflow and the review cadence.
+
 The annotation server requires only Python's standard library:
 
 ```sh
@@ -174,7 +176,10 @@ Text is read asynchronously with Vision (`TextReader`): the prompt, the "loaded 
 
 - weapons: "M4 / Rare AR" → `ar:rare`;
 - consumables: "Small Shield / Potion" → `small_shield`;
-- everything else, such as "Gold Chest / Interact" or "Hoverboard / Exit Vehicle", is `.other` and never picked up.
+- chests and crates ("Gold Chest / Interact", "Crate (Mystic) / Interact", "Air Drop Chest / Interact") are `.chest` and opened;
+- everything else, such as "Door / Open" or "Hoverboard / Exit Vehicle", is `.other` and never acted on.
+
+Recorded OCR misreads are tolerated: a count badge read as "XZ" or "K2O", a key box read as "Eo" or "5", and a subtitle one letter off a known one ("Uncommon SMC", "egendary Sniper"). While a consumable is in your hand the panel now and then shows "Left Click to Consume" over its effect (4 of 483 recorded frames); when it does, that names the item in the selected slot.
 
 `AssistantCore/Catalog.swift` defines weapon classes:
 
@@ -271,7 +276,7 @@ Record at least one complete supervised test episode in each mode, inspect the r
 
 `ally_exclusion`, `obstacles`, `ambiguous_interactions`, `healing_interrupt`, `temporary_swap`, `missing_weapon`, `stack_remaining`, `focus_loss`, `stale_frame`, `resize`, `emergency_stop`, `manual_movement`.
 
-Check that E never targets doors/chests/revives, the bot never emits movement, native inputs actually reach the game, and Option/Escape/focus loss release held inputs. Confirm Retina coordinate mapping and input behavior on the actual Mac. Inspect ammo and item-change acknowledgments, not just overlay predictions.
+Check that E never targets doors, vehicles or revives (chests and crates are opened on purpose), the bot never emits movement, native inputs actually reach the game, and Option/Escape/focus loss release held inputs. Confirm Retina coordinate mapping and input behavior on the actual Mac. Inspect ammo and item-change acknowledgments, not just overlay predictions.
 
 Create an acceptance JSON record using actual observations. Do not mark a scenario passed without exercising it:
 

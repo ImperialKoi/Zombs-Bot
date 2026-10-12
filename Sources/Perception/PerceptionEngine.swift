@@ -105,21 +105,38 @@ public final class PerceptionEngine {
             o.phase = .unknown
         }
 
-        // Text: requested when its pixels change, used only while they still match.
+        // Text: requested when its pixels change, used only while they still match. The prompt is matched by its text
+        // mask, which the map scrolling behind the translucent panel does not change, so walking keeps the read valid.
         var prompt: InteractionPrompt?
+        var held: ItemIdentity?
         if alive && hud.promptVisible {
-            if promptPanel.map({ !fingerprintsMatch($0.fingerprint, hud.promptFingerprint, tolerance: 12) }) ?? true {
+            if promptPanel.map({ !PromptMask.matches($0.fingerprint, hud.promptFingerprint) }) ?? true {
                 promptPanel = (hud.promptFingerprint, t)
             }
             let panel = hud.promptRect ?? layout.prompt
-            text.request(.prompt, fingerprint: hud.promptFingerprint, time: t) { image.cgImage(panel) }
-            if let read = text.current(.prompt, fingerprint: hud.promptFingerprint) {
+            // Read again whenever the text looks even slightly different, so a changed rarity word is not missed.
+            text.request(.prompt, fingerprint: hud.promptFingerprint, time: t,
+                         fresh: { textMaskSimilarity($0, $1, columns: PromptMask.columns) >= 0.95 }, retryEmpty: 1) { image.cgImage(panel) }
+            if let read = text.current(.prompt, fingerprint: hud.promptFingerprint, matches: PromptMask.matches) {
                 result.promptLines = read.lines.map(\.text)
-                prompt = HUDText.prompt(lines: result.promptLines, confidence: read.confidence, catalog: settings.catalog, key: settings.interactKey)
-                prompt?.stable = t - (promptPanel?.since ?? t) >= 0.15 || text.synchronous
+                if let id = HUDText.heldConsumable(lines: result.promptLines, catalog: settings.catalog) {
+                    // The panel describes the consumable in your hand; there is nothing to interact with. Only a read of
+                    // these very pixels names a slot, never one left over from before a switch.
+                    if textMaskSimilarity(read.fingerprint, hud.promptFingerprint, columns: PromptMask.columns) >= 0.95 {
+                        o.heldConsumable = id
+                        held = ItemIdentity(kind: .healing, healID: id, name: settings.catalog.heal(id: id)?.name ?? id)
+                    }
+                } else {
+                    // Vision rates short words ("M4", "AK") and stray marks lower; judge the read by its words.
+                    let words = read.lines.filter { $0.text.filter { $0.isLetter || $0.isNumber }.count >= 3 }
+                    prompt = HUDText.prompt(lines: result.promptLines, confidence: words.map(\.confidence).min() ?? read.confidence,
+                                            catalog: settings.catalog, key: settings.interactKey)
+                    prompt?.stable = t - (promptPanel?.since ?? t) >= 0.15 || text.synchronous
+                }
             }
         } else { promptPanel = nil }
         o.prompt = prompt
+        o.promptVisible = alive && hud.promptVisible
 
         var readout: (loaded: Int, reserve: Int)?
         var counts: [Int: Int] = [:], reserves: [Int: Int] = [:]
@@ -128,6 +145,7 @@ public final class PerceptionEngine {
             if let read = text.current(.readout, fingerprint: hud.readoutFingerprint) {
                 result.readoutText = read.text
                 readout = HUDText.ammunition(read.text) ?? read.lines.lazy.compactMap { HUDText.ammunition($0.text) }.first
+                o.gunInHand = readout != nil
             }
             for slot in hud.slots where slot.occupied && slot.index >= 2 {
                 text.request(.slot(slot.index), fingerprint: slot.number, time: t) { image.cgImage(layout.slotNumber(slot.index)) }
@@ -153,7 +171,8 @@ public final class PerceptionEngine {
                 resolved.selectedSlot = slot; resolved.selectedConfidence = 1
             }
             o.selectedSlot = resolved.selectedSlot; o.selectedSlotConfidence = resolved.selectedConfidence
-            o.inventory = inventory.update(resolved, prompt: prompt, readout: readout, counts: counts, reserves: reserves, time: t)
+            o.inventory = inventory.update(resolved, prompt: prompt, readout: readout, counts: counts, reserves: reserves, time: t, held: held,
+                                           gunInHand: o.gunInHand)
         }
         result.roster = roster
         result.hudMilliseconds = (ProcessInfo.processInfo.systemUptime - started) * 1000

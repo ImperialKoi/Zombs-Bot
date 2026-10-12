@@ -4,6 +4,7 @@ Training runs on a Kaggle GPU: kaggle_train.py uploads the train/val splits and 
 the kernel calls fit(). This machine only exports the downloaded checkpoint to raw YOLO11-seg
 Core ML outputs: train.py DATASET OUTPUT --weights best.pt
 """
+from __future__ import annotations
 import argparse
 import hashlib
 import json

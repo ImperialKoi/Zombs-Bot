@@ -139,6 +139,8 @@ func run() throws {
                     case .fire: actions["fire", default: 0] += 1
                     case .selectSlot(let i): actions["select \(i)", default: 0] += 1
                     case .pickup(let name): actions["pickup \(name)", default: 0] += 1
+                    case .open(let name): actions["open \(name)", default: 0] += 1
+                    case .holdOpen(let name): actions["hold open \(name)", default: 0] += 1
                     case .reload: actions["reload", default: 0] += 1
                     case .useConsumable: actions["heal", default: 0] += 1
                     case .aim: actions["aim", default: 0] += 1

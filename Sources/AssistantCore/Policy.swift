@@ -14,6 +14,17 @@ public struct CombatSettings: Codable, Equatable, Sendable {
     public var minAffiliationConfidence = 0.9
     /// Inventory slots kept for consumables while a weapon role is still missing.
     public var minHealSlots = 2
+    /// Seconds from your click to the game acting on it; aim leads the opponent by this on top of the frame's age.
+    public var leadLatency = 0.06
+    /// Seconds over which an opponent's current velocity is expected to last: players strafe and turn, so a full
+    /// constant-velocity lead overshoots them on long shots. 0 keeps the full lead.
+    public var leadPersistence = 1.0
+    /// The long-range gun is taken after this many seconds without a threat or a player in view…
+    public var idleQuiet = 2.5
+    /// …and this many seconds after the last fight.
+    public var idleAfterFight = 8.0
+    /// Seconds a slot you pick yourself is left alone by the idle weapon.
+    public var idleUserRespect = 30.0
     public init() {}
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -25,11 +36,17 @@ public struct CombatSettings: Codable, Equatable, Sendable {
         minPlayerConfidence = try c.decodeIfPresent(Double.self, forKey: .minPlayerConfidence) ?? d.minPlayerConfidence
         minAffiliationConfidence = try c.decodeIfPresent(Double.self, forKey: .minAffiliationConfidence) ?? d.minAffiliationConfidence
         minHealSlots = try c.decodeIfPresent(Int.self, forKey: .minHealSlots) ?? d.minHealSlots
+        leadLatency = try c.decodeIfPresent(Double.self, forKey: .leadLatency) ?? d.leadLatency
+        leadPersistence = try c.decodeIfPresent(Double.self, forKey: .leadPersistence) ?? d.leadPersistence
+        idleQuiet = try c.decodeIfPresent(Double.self, forKey: .idleQuiet) ?? d.idleQuiet
+        idleAfterFight = try c.decodeIfPresent(Double.self, forKey: .idleAfterFight) ?? d.idleAfterFight
+        idleUserRespect = try c.decodeIfPresent(Double.self, forKey: .idleUserRespect) ?? d.idleUserRespect
     }
     public var isValid: Bool {
         [closeCutoff, longCutoff, bandHysteresis, switchDwell, minPlayerConfidence, minAffiliationConfidence].allSatisfy(\.isFinite)
         && closeCutoff > 0 && longCutoff > closeCutoff + 2 * bandHysteresis && bandHysteresis >= 0 && switchDwell >= 0
         && (0...1).contains(minPlayerConfidence) && (0...1).contains(minAffiliationConfidence) && (0...5).contains(minHealSlots)
+        && (0...0.3).contains(leadLatency) && (0...10).contains(leadPersistence) && (0.5...30).contains(idleQuiet) && (0...60).contains(idleAfterFight) && (0...600).contains(idleUserRespect)
     }
 }
 
@@ -79,6 +96,13 @@ public enum Policy {
         guard let prompt = o.prompt, prompt.stable, prompt.isItem, prompt.confidence >= 0.8 else { return nil }
         return prompt
     }
+    /// The interaction prompt, when it names a chest or crate read from the current panel.
+    public static func chestPrompt(_ o: Observation) -> InteractionPrompt? {
+        guard let prompt = o.prompt, prompt.stable, prompt.kind == .chest, prompt.confidence >= 0.8 else { return nil }
+        return prompt
+    }
+    /// Air drops open after about 5 s at the chest, with a countdown under your character; other chests open at once.
+    public static func chestNeedsHold(_ prompt: InteractionPrompt) -> Bool { ItemCatalog.letters(prompt.name).contains("airdrop") }
     public static func healingBenefit(_ profile: ItemProfile, in o: Observation) -> Double {
         guard let hp = o.health, let shield = o.shield, o.hudConfidence >= 0.98,
               (0...100).contains(hp), (0...100).contains(shield) else { return 0 }
@@ -102,6 +126,16 @@ public struct ActionGuard {
             guard !Policy.immediateThreat(o, settings), let prompt = Policy.pickupPrompt(o), prompt.name == name,
                   let id = prompt.itemID, let p = profiles[id], p.verified, p.isValid, [.weapon, .healing].contains(p.kind) else { return false }
             return p.kind != .weapon || p.role != nil
+        case .open(let name):
+            // Only a chest or crate: the same key opens doors, enters vehicles and revives.
+            guard !Policy.immediateThreat(o, settings), let prompt = Policy.chestPrompt(o) else { return false }
+            return prompt.name == name
+        case .holdOpen(let name):
+            // A frame without a readable panel keeps the hold (interact with nothing in front does nothing);
+            // any other prompt, such as a door or a vehicle, ends it.
+            guard !Policy.immediateThreat(o, settings) else { return false }
+            guard let prompt = o.prompt else { return !o.promptVisible } // A panel not read yet may show anything.
+            return prompt.kind == .chest && prompt.name == name
         case .fire:
             guard let selected = o.selected, selected.confidence >= 0.98, o.selectedSlotConfidence >= 0.98,
                   let item = selected.itemID.flatMap({ profiles[$0] }), item.verified, item.isValid, item.kind == .weapon, item.role != nil,
@@ -112,7 +146,8 @@ public struct ActionGuard {
                 return predicted.distance(to: aim, aspect: o.aspect) <= 0.01
             }
         case .useConsumable:
-            guard let selected = o.selected, selected.confidence >= 0.98, selected.count > 0, o.selectedSlotConfidence >= 0.98,
+            // A readout showing rounds means a gun is in hand, whatever the slot is labeled: clicking would fire it.
+            guard o.gunInHand != true, let selected = o.selected, selected.confidence >= 0.98, selected.count > 0, o.selectedSlotConfidence >= 0.98,
                   let item = selected.itemID.flatMap({ profiles[$0] }), item.verified, item.isValid, item.kind == .healing else { return false }
             return Policy.healingBenefit(item, in: o) > 0 && !Policy.immediateThreat(o, settings)
         case .reload:

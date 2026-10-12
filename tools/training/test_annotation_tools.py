@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from annotate import load_for_review, prepare_review
 from dataset import LABELS, load_sessions
-from select_frames import allocate, informative, select, spread, taken_frames
+from select_frames import allocate, coarse_to_fine, full_pass, informative, select, spread, taken_frames
 
 HAS_CV = all(importlib.util.find_spec(name) for name in ("cv2", "numpy"))
 
@@ -76,6 +76,31 @@ class SelectFramesTests(unittest.TestCase):
             self.assertEqual({f["reason"] for f in frames if f["split"] != "train"}, {"evenly spaced"})
             self.assertTrue(all("train" in str(r["image_path"]) for r in calls), "the model never ranks held-out frames")
 
+    def test_coarse_to_fine_covers_everything_and_spreads_early(self):
+        pool = rows(range(100))
+        order = [r["timestamp"] for r in coarse_to_fine(pool)]
+        self.assertEqual(sorted(order), list(range(100)))
+        self.assertEqual(order[:4], [0, 50, 25, 75])
+        self.assertGreater(max(order[:16]) - min(order[:16]), 90)
+
+    def test_full_pass_takes_every_spaced_frame_after_carried_over_ones(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            corpus(root, dict(a=("duo", 20), b=("solo", 20), c=("solo", 20)), dict(a="train", b="val", c="test"))
+            (root / "a" / "annotations").mkdir()
+            (root / "a" / "annotations" / "000060.json").write_text(json.dumps(dict(reviewed=True, objects=[])))  # t = 2 s
+            queue = full_pass(root, min_gap=2.0, first=[dict(matchID="b", image="images/000300.jpg")])  # t = 10 s
+            frames = queue["frames"]
+            self.assertEqual((frames[0]["matchID"], frames[0]["image"]), ("b", "images/000300.jpg"))
+            keys = [(f["matchID"], f["image"]) for f in frames]
+            self.assertEqual(len(keys), len(set(keys)))
+            for match in "abc":
+                times = sorted(f["timeSeconds"] for f in frames if f["matchID"] == match)
+                self.assertTrue(all(y - x >= 2.0 for x, y in zip(times, times[1:])))
+                self.assertGreaterEqual(len(times), 8)
+            self.assertTrue(all(abs(f["timeSeconds"] - 2.0) >= 2.0 for f in frames if f["matchID"] == "a"))
+            self.assertEqual({f["split"] for f in frames[1:7]}, {"train", "val", "test"}, "splits interleave from the start")
+
     def test_reviewer_drafts_count_as_taken(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -116,6 +141,37 @@ class AnnotateDraftTests(unittest.TestCase):
                                    frame["image_path"])
             self.assertEqual(saved["objects"], [dict(label="rock", polygon=[[0, 0], [0.5, 0], [0.5, 0.5]])])
             self.assertEqual(len(saved["review"]["imageSHA256"]), 64)
+
+
+@unittest.skipUnless(HAS_CV, "needs OpenCV and NumPy (.venv)")
+class AnnotationQATests(unittest.TestCase):
+    square = staticmethod(lambda x, y, s=0.1: [[x, y], [x + s, y], [x + s, y + s], [x, y + s]])
+
+    def test_duplicates_conflicts_and_self_count_are_errors(self):
+        from annotation_qa import check
+        objects = [dict(label="player", polygon=self.square(0.1, 0.1)), dict(label="rock", polygon=self.square(0.1, 0.1)),
+                   dict(label="tree", polygon=self.square(0.5, 0.5)), dict(label="tree", polygon=self.square(0.5, 0.5)),
+                   dict(label="self_player", polygon=self.square(0.3, 0.3)), dict(label="self_player", polygon=self.square(0.7, 0.2))]
+        result = check(dict(objects=objects), "solo")
+        self.assertEqual(len(result["errors"]), 3)
+        self.assertIn("one object with two classes", result["errors"][0])
+        self.assertIn("the same object twice", result["errors"][1])
+        self.assertIn("2 self_player", result["errors"][2])
+
+    def test_warnings_for_misses_missing_self_and_team_markers(self):
+        from annotation_qa import check
+        objects = [dict(label="player", polygon=self.square(0.1, 0.1)), dict(label="tree", polygon=self.square(0.5, 0.5))]
+        detections = [dict(label="ground_item", polygon=self.square(0.8, 0.8, 0.05), confidence=0.9),   # nothing covers it
+                      dict(label="tree", polygon=self.square(0.5, 0.5), confidence=0.95),             # covered
+                      dict(label="rock", polygon=self.square(0.3, 0.7, 0.05), confidence=0.4)]       # not confident
+        result = check(dict(objects=objects), "duo", detections)
+        self.assertEqual(result["errors"], [])
+        warnings = " | ".join(result["warnings"])
+        self.assertIn("no self_player", warnings)
+        self.assertIn("no ally_marker", warnings)
+        self.assertIn("possible miss: model sees a ground_item (0.90)", warnings)
+        self.assertNotIn("rock", warnings)
+        self.assertNotIn("ally_marker", " ".join(check(dict(objects=objects), "solo")["warnings"]))
 
 
 @unittest.skipUnless(HAS_CV, "needs OpenCV and NumPy (.venv)")

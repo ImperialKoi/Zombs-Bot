@@ -27,31 +27,35 @@ public enum HUDText {
         return Int(value.replacingOccurrences(of: ",", with: ""))
     }
 
-    /// Interprets the interaction panel's text lines, top to bottom. Anything that is not
-    /// a recognizable weapon or consumable becomes `.other`, which is never picked up.
+    /// Interprets the interaction panel's text lines, top to bottom. Chests and crates become `.chest`;
+    /// anything else that is not a recognizable weapon or consumable becomes `.other`, which is never acted on.
     /// - Parameter key: the interact key's name ("E"); a different key letter rejects the panel.
     public static func prompt(lines rawLines: [String], confidence: Double, catalog: ItemCatalog, key: String? = nil) -> InteractionPrompt? {
         var lines = rawLines.map { promptLine($0) }.filter { !$0.isEmpty }
         var count: Int?
-        let badge = #"^[xX×]\s?([0-9]{1,3})$"#
-        // The stack badge sits beside the name; OCR may split it off or append it.
+        // The stack badge sits beside the name; OCR may split it off or append it, and reads "x2" as "XZ" or "x20" as "K2O".
         lines = lines.compactMap { line in
-            if line.range(of: badge, options: .regularExpression) != nil { count = Int(line.drop(while: { !$0.isNumber })); return nil }
+            if let value = badgeCount(line) { count = value; return nil }
             if let range = line.range(of: #"\s[xX×]\s?[0-9]{1,3}$"#, options: .regularExpression) {
                 count = Int(line[range].filter(\.isNumber)); return String(line[..<range.lowerBound])
             }
             return line
         }
         var keyLetter: String?
-        lines = lines.filter { line in
-            if line.count == 1, line.first!.isLetter || line.first!.isNumber { keyLetter = line.uppercased(); return false }
+        lines = lines.enumerated().filter { index, line in
+            if line.count == 1, line.first!.isLetter || line.first!.isNumber { if line.first!.isLetter { keyLetter = line.uppercased() }; return false }
+            // After the name, a one- or two-character line is the key box or a stray mark ("Eo", "00"), never the subtitle.
+            if index > 0 && line.count <= 2 { if line.first?.uppercased() == key?.uppercased() { keyLetter = key?.uppercased() }; return false }
             return true
-        }
+        }.map(\.element)
         guard lines.count >= 2 else { return nil }
-        let name = lines[0], subtitle = lines[1]
+        let name = lines[0]
+        var subtitle = lines[1]
         if let key, let keyLetter, keyLetter != key.uppercased() {
             return InteractionPrompt(name: name, subtitle: subtitle, kind: .other, count: count, confidence: confidence)
         }
+        // A subtitle one letter off a known one ("Uncommon SMC", "Rare ARO", "egendary Sniper") is read as that one.
+        if !knownSubtitle(subtitle, catalog: catalog), let corrected = nearestSubtitle(subtitle, catalog: catalog) { subtitle = corrected }
         let words = subtitle.split(separator: " ").map(String.init)
         if let first = words.first, let rarity = Rarity(word: first) {
             let phrase = words.dropFirst().joined(separator: " ").lowercased()
@@ -78,7 +82,74 @@ public enum HUDText {
             return InteractionPrompt(name: name, subtitle: subtitle, kind: .throwable, itemID: ItemCatalog.throwableID,
                                      count: count, confidence: confidence)
         }
+        if isContainer(name: name, subtitle: subtitle) {
+            return InteractionPrompt(name: name, subtitle: subtitle, kind: .chest, count: count, confidence: confidence)
+        }
         return InteractionPrompt(name: name, subtitle: subtitle, kind: .other, count: count, confidence: confidence)
+    }
+
+    /// Chests and crates, e.g. "Gold Chest", "Ammo Chest", "Air Drop Chest", "Present Crate" or "Crate (Mystic)",
+    /// always with the subtitle "Interact" (read as "Interast" or "Unteract" now and then). Doors ("Open"/"Close"),
+    /// vehicles and revives never match.
+    static func isContainer(name: String, subtitle: String) -> Bool {
+        let words = name.lowercased().split { !$0.isLetter }
+        return words.contains { $0 == "chest" || $0 == "crate" } && editDistance(ItemCatalog.letters(subtitle), "interact") <= 2
+    }
+
+    /// The stack size of a badge line: "x2", "×15", or OCR look-alikes such as "XZ" (x2), "XI5" (x15) and "K2O" (x20).
+    static func badgeCount(_ line: String) -> Int? {
+        guard line.range(of: #"^[xX×K]\s?[0-9ZzIlOoS]{1,3}$"#, options: .regularExpression) != nil else { return nil }
+        let digits: [Character: Character] = ["Z": "2", "z": "2", "I": "1", "l": "1", "O": "0", "o": "0", "S": "5"]
+        return Int(String(line.dropFirst().filter { $0 != " " }.map { digits[$0] ?? $0 }))
+    }
+
+    /// The subtitle phrases the panel can show: "<rarity> <class>", consumable and throwable words, "Interact".
+    static func subtitles(_ catalog: ItemCatalog) -> [String] {
+        var phrases = Rarity.allCases.flatMap { rarity in catalog.classWords.keys.map { "\(rarity.name.lowercased()) \($0)" } }
+        phrases += Rarity.allCases.flatMap { rarity in catalog.throwableWords.map { "\(rarity.name.lowercased()) \($0)" } }
+        return phrases + catalog.healingWords + catalog.throwableWords + ["interact"]
+    }
+    static func knownSubtitle(_ subtitle: String, catalog: ItemCatalog) -> Bool {
+        let lowered = subtitle.lowercased()
+        let words = lowered.split(separator: " ")
+        if let first = words.first, Rarity(word: String(first)) != nil {
+            let phrase = words.dropFirst().joined(separator: " ")
+            if catalog.classWords[phrase] != nil || catalog.throwableWords.contains(where: { phrase.contains($0) }) || catalog.healingWords.contains(phrase) { return true }
+        }
+        return catalog.healingWords.contains(lowered) || catalog.throwableWords.contains(lowered) || lowered == "interact"
+    }
+    /// The known subtitle one edit away (two for long ones), when exactly one is that close.
+    static func nearestSubtitle(_ subtitle: String, catalog: ItemCatalog) -> String? {
+        let lowered = subtitle.lowercased()
+        guard lowered.count >= 4 else { return nil }
+        let limit = lowered.count >= 12 ? 2 : 1
+        let ranked = subtitles(catalog).map { ($0, editDistance(lowered, $0)) }.filter { $0.1 <= limit }.sorted { $0.1 < $1.1 }
+        guard let best = ranked.first, ranked.dropFirst().first.map({ $0.1 > best.1 }) ?? true else { return nil }
+        return best.0
+    }
+
+    /// What the panel says while a consumable is in your hand: "Left Click to Consume" over its effect, e.g.
+    /// "Charge shield by 25% up to 50%". Returns that consumable's catalog ID.
+    public static func heldConsumable(lines rawLines: [String], catalog: ItemCatalog) -> String? {
+        let lines = rawLines.map { promptLine($0) }
+        guard lines.contains(where: { nameSimilarity($0, "Left Click to Consume") >= 0.8 || nameKey($0).hasSuffix("toconsume") }) else { return nil }
+        return catalog.heal(hintLines: lines)?.id
+    }
+
+    /// Levenshtein distance between two strings.
+    static func editDistance(_ a: String, _ b: String) -> Int {
+        let x = Array(a), y = Array(b)
+        if x.isEmpty { return y.count }
+        if y.isEmpty { return x.count }
+        var previous = Array(0...y.count), current = [Int](repeating: 0, count: y.count + 1)
+        for i in 1...x.count {
+            current[0] = i
+            for j in 1...y.count {
+                current[j] = min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (x[i - 1] == y[j - 1] ? 0 : 1))
+            }
+            swap(&previous, &current)
+        }
+        return previous[y.count]
     }
 
     /// Text recognition sometimes returns Cyrillic look-alikes inside English words ("Еріс SMG").

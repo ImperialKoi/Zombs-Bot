@@ -42,6 +42,8 @@ struct Dashboard:View {
                         Text("AUTOMATION").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                         Toggle("Aim, shoot & switch guns",isOn:$model.features.combat)
                         Toggle("Pick up guns & heals",isOn:$model.features.loot)
+                        Toggle("Open chests & crates",isOn:$model.features.chests)
+                        Toggle("Carry the sniper when it's quiet",isOn:$model.features.idleWeapon)
                         Toggle("Heal during safe gaps",isOn:$model.features.healing)
                         Button(model.armed ? "Turn off supervised input" : "Enable supervised input",systemImage:model.armed ? "power" : "play.fill") {
                             if model.armed { model.pause() } else { model.arm() }

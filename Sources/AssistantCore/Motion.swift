@@ -81,8 +81,11 @@ public struct PlayerMotionTracker: Sendable {
     /// A confirmed player the detector misses is still reported at its predicted position this long, so a
     /// fight does not stop for a few missed frames.
     public static let hold = 0.25
-    /// Detections needed before a track counts as a real player rather than a one-frame false positive.
+    /// Detections needed before a track counts as a real player rather than a one-frame false positive…
     public static let confirmHits = 3
+    /// …spread over at least this many seconds. At 55 updates a second three frames took 55 ms, so brief false
+    /// detections passed as players, interrupted heals and pulled the gun out; 5 fps recordings took 0.4 s.
+    public static let confirmAge = 0.12
 
     public struct Track: Equatable, Sendable {
         public var id: Int
@@ -99,12 +102,13 @@ public struct PlayerMotionTracker: Sendable {
     private var tracks: [Int: MotionFilter] = [:]
     private var lastSeen: [Int: Double] = [:]
     private var hits: [Int: Int] = [:]
+    private var firstSeen: [Int: Double] = [:]
     private var nextID = 1
     /// Confirmed tracks the latest update did not detect, with their predicted screen positions.
     public private(set) var held: [(track: Track, position: Point)] = []
     public init() {}
 
-    public mutating func reset() { time = nil; camera = Point(); own = nil; tracks = [:]; lastSeen = [:]; hits = [:]; held = [] }
+    public mutating func reset() { time = nil; camera = Point(); own = nil; tracks = [:]; lastSeen = [:]; hits = [:]; firstSeen = [:]; held = [] }
 
     /// `sceneryShift` is the median normalized screen displacement of static objects since the
     /// previous call, or nil when none were matched. Results follow the order of `players`.
@@ -146,12 +150,13 @@ public struct PlayerMotionTracker: Sendable {
             assigned[candidate.index] = candidate.id; used.insert(candidate.id)
         }
         let ownVelocity = own?.velocity ?? Point(), ownVariance = own?.velocityVariance ?? Self.initialVelocityVariance
+        func confirmed(_ id: Int) -> Bool { (hits[id] ?? 0) >= Self.confirmHits && t - (firstSeen[id] ?? t) >= Self.confirmAge }
         func report(_ id: Int, _ track: MotionFilter) -> Track {
             let relative = track.velocity - ownVelocity
             return Track(id: id, velocity: Point(relative.x, relative.y * aspect), motion: MotionEstimate(
                 groundVelocity: Point(track.velocity.x, track.velocity.y * aspect), positionVariance: track.positionVariance,
                 positionVelocityCovariance: track.covariance, velocityVariance: track.velocityVariance,
-                ownVelocityVariance: ownVariance), confirmed: (hits[id] ?? 0) >= Self.confirmHits)
+                ownVelocityVariance: ownVariance), confirmed: confirmed(id))
         }
         var result: [Track] = []
         for (index, z) in ground.enumerated() {
@@ -163,18 +168,18 @@ public struct PlayerMotionTracker: Sendable {
             } else {
                 id = nextID; nextID += 1
                 tracks[id] = filter(z, Self.initialVelocityVariance)
-                hits[id] = 1
+                hits[id] = 1; firstSeen[id] = t
             }
             lastSeen[id] = t
             result.append(report(id, tracks[id]!))
         }
         let detected = Set(result.map(\.id))
         held = tracks.compactMap { id, track -> (track: Track, position: Point)? in
-            guard !detected.contains(id), let seen = lastSeen[id], t - seen <= Self.hold, (hits[id] ?? 0) >= Self.confirmHits else { return nil }
+            guard !detected.contains(id), let seen = lastSeen[id], t - seen <= Self.hold, confirmed(id) else { return nil }
             let screen = track.position - camera
             return (report(id, track), Point(screen.x, screen.y * aspect))
         }.sorted { $0.track.id < $1.track.id }
-        for (id, seen) in lastSeen where t - seen > Self.coast { tracks[id] = nil; lastSeen[id] = nil; hits[id] = nil }
+        for (id, seen) in lastSeen where t - seen > Self.coast { tracks[id] = nil; lastSeen[id] = nil; hits[id] = nil; firstSeen[id] = nil }
         time = t
         return result
     }
