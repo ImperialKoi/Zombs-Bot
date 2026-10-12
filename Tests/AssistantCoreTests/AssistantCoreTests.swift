@@ -827,6 +827,52 @@ struct AssistantCoreTests {
         _=step(d,p);d.features.chests=false;p.timestamp=0.5;expectEqual(step(d,p).intents,[.releaseAll])
     }
 
+    // MARK: Crosshair circle
+    /// The aim direction from you in pixel proportions, the way the game turns your character.
+    func pixelAngle(_ p:Point,from player:Point,aspect:Double)->Double { atan2(p.y-player.y,(p.x-player.x)*aspect) }
+    @Test func testCursorKeepsTheAngleButStaysInsideTheCircle() {
+        let center=Point(0.5,0.5)
+        for aspect in [1.0,16.0/9.0,3840.0/1736.0] {
+            for k in 0..<72 {
+                let a=Double(k)*Double.pi/36
+                // Opponents at the screen's edge in every direction, where the old cursor pressed on the window border.
+                let far=Point(min(0.999,max(0.001,0.5+cos(a)*0.6/aspect)),min(0.999,max(0.001,0.5+sin(a)*0.6)))
+                let c=Targeting.cursor(toward:far,from:center,aspect:aspect,radius:0.35)
+                #expect(abs(c.angle-pixelAngle(far,from:center,aspect:aspect)) < 1e-9)
+                #expect(abs(pixelAngle(c.point,from:center,aspect:aspect)-c.angle) < 1e-9)
+                let reach=(((c.point.x-0.5)*aspect)*((c.point.x-0.5)*aspect)+(c.point.y-0.5)*(c.point.y-0.5)).squareRoot()
+                #expect(reach <= 0.35+1e-12)
+                #expect((0.04-1e-12...0.96+1e-12).contains(c.point.x) && (0.04-1e-12...0.96+1e-12).contains(c.point.y))
+            }
+        }
+        // Inside the circle the crosshair goes right on the point.
+        let near=Point(0.55,0.6), inside=Targeting.cursor(toward:near,from:center,aspect:16.0/9.0,radius:0.35)
+        #expect(inside.point==near)
+        // Angles are measured in pixels: on a 2:1 view, 0.1 of the width right and 0.2 of the height down is 45°.
+        #expect(abs(Targeting.cursor(toward:Point(0.6,0.7),from:center,aspect:2,radius:0.35).angle-Double.pi/4) < 1e-12)
+    }
+    @Test func testCursorRespectsTheEdgesWhenYouAreNotCentered() {
+        // Close to the top edge, straight up can only go to the margin; the direction stays straight up.
+        let c=Targeting.cursor(toward:Point(0.5,0.0),from:Point(0.5,0.2),aspect:16.0/9.0,radius:0.35)
+        #expect(abs(c.point.x-0.5) < 1e-12 && abs(c.point.y-0.04) < 1e-12 && abs(c.angle+Double.pi/2) < 1e-12)
+        // A diagonal toward the top-left corner is cut where it meets the margin, keeping its angle.
+        let player=Point(0.2,0.2), corner=Point(0,0)
+        let d=Targeting.cursor(toward:corner,from:player,aspect:16.0/9.0,radius:0.35)
+        #expect(abs(pixelAngle(d.point,from:player,aspect:16.0/9.0)-pixelAngle(corner,from:player,aspect:16.0/9.0)) < 1e-9)
+        #expect(min(d.point.x,d.point.y) >= 0.04-1e-12 && abs(min(d.point.x,d.point.y)-0.04) < 1e-12)
+    }
+    @Test func testCursorDegenerateInputsStayOnYou() {
+        let you=Point(0.5,0.5)
+        #expect(Targeting.cursor(toward:you,from:you,aspect:2,radius:0.35).point==you)
+        #expect(Targeting.cursor(toward:Point(.nan,0.2),from:you,aspect:2,radius:0.35).point==you)
+        #expect(Targeting.cursor(toward:Point(0.9,0.5),from:you,aspect:0,radius:0.35).point==you)
+        var settings=CombatSettings();settings.aimRadius=0.6;#expect(!settings.isValid)
+        settings.aimRadius=0.3;#expect(settings.isValid)
+        // Saved settings from before the circle load with the default.
+        let old=try! JSONDecoder().decode(CombatSettings.self,from:Data(#"{"closeCutoff":0.13,"longCutoff":0.33}"#.utf8))
+        #expect(old.aimRadius==0.35 && old.isValid)
+    }
+
     // MARK: Prompt misreads and the consumable in hand
     @Test func testPromptParserToleratesRecordedMisreads() throws {
         let catalog=ItemCatalog.standard

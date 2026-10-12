@@ -16,6 +16,33 @@ public enum Targeting {
         persistence > 0 ? -persistence * expm1(-seconds / persistence) : seconds
     }
 
+    /// Where the mouse goes to aim at a point, and the direction it aims.
+    public struct Cursor: Equatable, Sendable {
+        public var point: Point
+        /// Direction from your character in radians, measured in screen pixels: 0 is right, π/2 is down.
+        public var angle: Double
+    }
+
+    /// The game shoots from your character along the line through the cursor, so only the direction counts. The cursor
+    /// goes in that direction but no farther than `radius` view heights from you, and stays `margin` inside the game
+    /// area: a click on the window's edge resized or dragged the window. Inside the circle it goes exactly on the point.
+    /// Distances and the angle are taken in pixel proportions (x scaled by `aspect`), so a wide view does not bend the aim.
+    public static func cursor(toward target: Point, from player: Point, aspect: Double, radius: Double, margin: Double = 0.04) -> Cursor {
+        guard target.isFinite, player.isFinite, aspect.isFinite, aspect > 0, radius.isFinite, radius > 0 else { return Cursor(point: player, angle: 0) }
+        let dx = (target.x - player.x) * aspect, dy = target.y - player.y
+        let length = (dx * dx + dy * dy).squareRoot()
+        guard length > 1e-9 else { return Cursor(point: player, angle: 0) }
+        let angle = atan2(dy, dx)
+        let ux = dx / length, uy = dy / length
+        // How far the cursor can go along this direction before leaving the area `margin` inside the view.
+        var reach = min(length, radius)
+        if ux > 0 { reach = min(reach, (1 - margin - player.x) * aspect / ux) } else if ux < 0 { reach = min(reach, (player.x - margin) * aspect / -ux) }
+        if uy > 0 { reach = min(reach, (1 - margin - player.y) / uy) } else if uy < 0 { reach = min(reach, (player.y - margin) / -uy) }
+        reach = max(0, reach)
+        if reach >= length { return Cursor(point: target, angle: angle) }
+        return Cursor(point: Point(player.x + cos(angle) * reach / aspect, player.y + sin(angle) * reach), angle: angle)
+    }
+
     public static func aim(at target: PlayerTrack, in o: Observation, weapon: ItemProfile, now: Double,
                            settings: CombatSettings = .init()) -> Point? {
         guard let intercept = intercept(target, in: o, weapon: weapon, now: now, settings: settings),

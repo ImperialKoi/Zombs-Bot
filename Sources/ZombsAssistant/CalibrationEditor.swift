@@ -48,6 +48,9 @@ struct CalibrationEditor:View {
                     Slider(value:$draft.combat.leadLatency,in:0...0.25,step:0.01) { Text(String(format:"Aim lead +%.0f ms",draft.combat.leadLatency*1000)).frame(width:170,alignment:.leading) }
                     Text("Shots lead a moving opponent by the bullet's flight plus this delay. Raise it if shots trail behind opponents, lower it if they land in front.")
                         .font(.caption).foregroundStyle(.secondary)
+                    Slider(value:$draft.combat.aimRadius,in:0.15...0.45,step:0.01) { Text(String(format:"Crosshair circle %.0f%%",draft.combat.aimRadius*100)).frame(width:170,alignment:.leading) }
+                    Text("The crosshair stays within this share of the view's height from your character, pointing the same way at opponents farther out, so clicks never land on the window's edges.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Stepper("Keep \(draft.combat.minHealSlots) heal slots when picking up a missing gun",value:$draft.combat.minHealSlots,in:0...4)
                 }.padding(6)
             }

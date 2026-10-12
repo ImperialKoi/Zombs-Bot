@@ -25,6 +25,9 @@ public struct CombatSettings: Codable, Equatable, Sendable {
     public var idleAfterFight = 8.0
     /// Seconds a slot you pick yourself is left alone by the idle weapon.
     public var idleUserRespect = 30.0
+    /// The cursor stays within this many view heights of your character (see `Targeting.cursor`); the aim keeps its
+    /// direction, and clicks stay away from the window's edges.
+    public var aimRadius = 0.35
     public init() {}
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -41,12 +44,14 @@ public struct CombatSettings: Codable, Equatable, Sendable {
         idleQuiet = try c.decodeIfPresent(Double.self, forKey: .idleQuiet) ?? d.idleQuiet
         idleAfterFight = try c.decodeIfPresent(Double.self, forKey: .idleAfterFight) ?? d.idleAfterFight
         idleUserRespect = try c.decodeIfPresent(Double.self, forKey: .idleUserRespect) ?? d.idleUserRespect
+        aimRadius = try c.decodeIfPresent(Double.self, forKey: .aimRadius) ?? d.aimRadius
     }
     public var isValid: Bool {
         [closeCutoff, longCutoff, bandHysteresis, switchDwell, minPlayerConfidence, minAffiliationConfidence].allSatisfy(\.isFinite)
         && closeCutoff > 0 && longCutoff > closeCutoff + 2 * bandHysteresis && bandHysteresis >= 0 && switchDwell >= 0
         && (0...1).contains(minPlayerConfidence) && (0...1).contains(minAffiliationConfidence) && (0...5).contains(minHealSlots)
         && (0...0.3).contains(leadLatency) && (0...10).contains(leadPersistence) && (0.5...30).contains(idleQuiet) && (0...60).contains(idleAfterFight) && (0...600).contains(idleUserRespect)
+        && (0.1...0.45).contains(aimRadius)
     }
 }
 

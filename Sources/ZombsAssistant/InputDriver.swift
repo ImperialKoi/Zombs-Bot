@@ -44,14 +44,20 @@ final class InputDriver {
             switch intent {
             case .releaseAll: releaseAll()
             case .aim(let point):
+                // `aim` stays the point aimed at, which the guard checks; the mouse only goes as far as the aim circle.
                 aim = point
-                // Viewport coordinates cover the captured game area below Chrome's toolbar.
-                let x: Double = Double(bounds.minX + content.minX) + point.x * Double(content.width)
-                let y: Double = Double(bounds.minY + content.minY) + point.y * Double(content.height)
-                let screen = CGPoint(x: x, y: y)
-                post(CGEvent(mouseEventSource: source, mouseType: mouseHeld ? .leftMouseDragged : .mouseMoved, mouseCursorPosition: screen, mouseButton: .left))
+                move(to: Targeting.cursor(toward: point, from: o.player, aspect: o.aspect, radius: settings.aimRadius).point, bounds, content)
             case .fire, .useConsumable:
-                if !mouseHeld { post(CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: CGEvent(source:nil)?.location ?? .zero, mouseButton:.left)); mouseHeld = true }
+                guard !mouseHeld else { break }
+                // Press only inside the aim circle, never where the cursor was left: a press on the window's edge resizes
+                // or drags the window. A shot goes along the aim; a consumable does not care where you click.
+                let press: Point
+                if case .fire = intent, let aim { press = Targeting.cursor(toward: aim, from: o.player, aspect: o.aspect, radius: settings.aimRadius).point }
+                else if let here = CGEvent(source: nil).map({ viewport($0.location, bounds, content) }), insideCircle(here, o) { press = here }
+                else { press = o.player }
+                move(to: press, bounds, content)
+                post(CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: screen(press, bounds, content), mouseButton: .left))
+                mouseHeld = true
             case .selectSlot(let index): releaseAll(); tap(bindings.slots[index - 1])
             case .reload: releaseAll(); tap(bindings.reload)
             case .pickup, .open: releaseAll(); tap(bindings.interact)
@@ -69,6 +75,21 @@ final class InputDriver {
         pressedKeys.removeAll()
         releaseInteract()
         aim = nil
+    }
+    /// Viewport coordinates cover the captured game area below Chrome's toolbar.
+    private func screen(_ p: Point, _ bounds: CGRect, _ content: CGRect) -> CGPoint {
+        CGPoint(x: Double(bounds.minX + content.minX) + p.x * Double(content.width), y: Double(bounds.minY + content.minY) + p.y * Double(content.height))
+    }
+    private func viewport(_ s: CGPoint, _ bounds: CGRect, _ content: CGRect) -> Point {
+        guard content.width > 0, content.height > 0 else { return Point(-1, -1) }
+        return Point((Double(s.x) - Double(bounds.minX + content.minX)) / Double(content.width), (Double(s.y) - Double(bounds.minY + content.minY)) / Double(content.height))
+    }
+    private func move(to p: Point, _ bounds: CGRect, _ content: CGRect) {
+        post(CGEvent(mouseEventSource: source, mouseType: mouseHeld ? .leftMouseDragged : .mouseMoved, mouseCursorPosition: screen(p, bounds, content), mouseButton: .left))
+    }
+    /// Whether a viewport point is where `Targeting.cursor` could have put it: within the aim circle around you.
+    private func insideCircle(_ p: Point, _ o: Observation) -> Bool {
+        p.isInViewport && Targeting.cursor(toward: p, from: o.player, aspect: o.aspect, radius: settings.aimRadius).point.distance(to: p, aspect: o.aspect) < 1e-6
     }
     private func releaseInteract() {
         lock.lock(); defer { lock.unlock() }
