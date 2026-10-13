@@ -7,7 +7,9 @@ public final class Coordinator {
     public let profiles: [String: ItemProfile]
     private enum Pending {
         case selection(slot: Int, settle: Double, deadline: Double)
-        case pickup(name: String, before: [InventorySlot], deadline: Double)
+        /// Interact was pressed for an item (`amount` of it, as the panel's badge or the ground stack says); it is taken
+        /// once the inventory gains it or the panel moves on.
+        case pickup(name: String, item: String?, amount: Int, before: [InventorySlot], deadline: Double)
         case reload(slot: Int, deadline: Double)
         /// Interact was pressed at a chest; it is open once its prompt goes away.
         case opening(name: String, deadline: Double)
@@ -37,7 +39,17 @@ public final class Coordinator {
     /// Recent confident health and shield readings, to tell gunfire from storm ticks and bar noise.
     private var vitals: [(time: Double, health: Double, shield: Double)] = []
     /// Health and shield still to arrive from doses that heal over time (hybrids), each spread evenly until `until`.
-    private var arriving: [(health: Double, shield: Double, from: Double, until: Double)] = []
+    private var arriving: [(item: String, health: Double, shield: Double, from: Double, until: Double)] = []
+    /// How many of its consumable each slot holds. The slot's digits are rarely readable, so the assistant counts its own
+    /// pickups and drinks. A stack it did not see arrive counts as one ground stack and is not `known`.
+    private struct StackCount { var item: String; var count: Int; var known: Bool }
+    private var stacks: [Int: StackCount] = [:]
+    /// A consumable just picked up whose slot has not shown yet: the slot it appears in gets this count.
+    private var arrivingStack: (item: String, amount: Int, until: Double)?
+    /// Slots last read as empty: a consumable that then appears in one is a single ground stack, picked up by either of you.
+    private var seenEmpty: Set<Int> = []
+    /// The stack badge last read for the item on the panel ("x4"): it is not readable in every frame.
+    private var badge: (name: String, count: Int)?
     /// Since when the HUD has been unreadable while a heal plan waits, and when the planned item has been selected
     /// without the potion showing in hand yet.
     private var unclearSince: Double?
@@ -66,6 +78,8 @@ public final class Coordinator {
     private var pickupBlockedUntil: [String: Double] = [:]
     /// Chest names with a recent interact press, and when they may be tried again.
     private var chestBlockedUntil: [String: Double] = [:]
+    /// Interact presses for the item or chest on screen that showed no effect yet.
+    private var interactPresses: [String: Int] = [:]
     private var priorWeaponSlot: Int?
     private var band: WeaponRole?
     private var lastRangeSwitch = -Double.infinity
@@ -80,8 +94,8 @@ public final class Coordinator {
     public func reset() {
         pending = nil; heal = nil; healPlan = nil; recovery = nil; targetID = nil
         lastThreat = nil; lastPlayerSeen = -.infinity; vitals = []; arriving = []; lastFrame = -.infinity; lastShot = -.infinity
-        unclearSince = nil; inHandSince = nil; noAmmoUntil = [:]
-        cooldownUntil = -.infinity; pickupBlockedUntil = [:]; chestBlockedUntil = [:]; priorWeaponSlot = nil
+        unclearSince = nil; inHandSince = nil; noAmmoUntil = [:]; stacks = [:]; arrivingStack = nil; seenEmpty = []; badge = nil
+        cooldownUntil = -.infinity; pickupBlockedUntil = [:]; chestBlockedUntil = [:]; interactPresses = [:]; priorWeaponSlot = nil
         band = nil; lastRangeSwitch = -.infinity; lastTargetSeen = -.infinity; healAttempts = []; healPausedUntil = -.infinity
         lastRequested = nil; lastSelection = nil; userChoiceUntil = -.infinity; lootNote = nil; lastIdleRequest = -.infinity
     }
@@ -92,6 +106,9 @@ public final class Coordinator {
     static let healthHit = 5.0, shieldHit = 1.5, damageWindow = 0.3
     /// Heal selections without a completed dose before healing pauses, and for how long.
     static let healAttemptLimit = 4, healPause = 8.0
+    /// The game answers interact within a few frames: an item or chest still on screen this long after a press is
+    /// pressed again, up to `interactTries` presses, then left alone for `interactBlock`.
+    static let interactRetry = 0.6, interactTries = 3, interactBlock = 3.0
     /// The distance band chosen for the current target, for diagnostics.
     public var currentBand: WeaponRole? { band }
     /// The healing item being selected or used, nil otherwise. The app asks you to stand still meanwhile.
@@ -105,8 +122,9 @@ public final class Coordinator {
         return p
     }
     private func idle(_ t: Double, _ reason: String) -> Decision { Decision(t, [.releaseAll], reason) }
-    private func select(_ slot: InventorySlot, in o: Observation, now t: Double, reason: String) -> Decision {
-        pending = .selection(slot: slot.index, settle: t + (profile(slot)?.switchDelay ?? 0.2), deadline: t + 1)
+    /// - Parameter settle: seconds to wait once the slot shows as selected; a weapon's switch delay by default.
+    private func select(_ slot: InventorySlot, in o: Observation, now t: Double, reason: String, settle: Double? = nil) -> Decision {
+        pending = .selection(slot: slot.index, settle: t + (settle ?? profile(slot)?.switchDelay ?? 0.2), deadline: t + 1)
         lastRequested = (slot.index, t)
         return Decision(o.timestamp, [.releaseAll, .selectSlot(slot.index)], reason)
     }
@@ -154,6 +172,8 @@ public final class Coordinator {
             healAttempts = []; inHandSince = nil // A halted heal did not fail.
             // A slot you press while taking over shows as a change afterwards; a new match does not.
             if !o.manualOverride { lastSelection = nil }
+            // A key you press yourself may have added to a stack or drunk from one.
+            else { for slot in stacks.keys { stacks[slot]?.known = false } }
             return idle(o.timestamp, reason)
         }
         guard o.timestamp > lastFrame else { return idle(o.timestamp, "Awaiting a new frame") }
@@ -185,7 +205,11 @@ public final class Coordinator {
         let safeToHeal = !threatened && t - (lastThreat ?? t) >= 2 && t - lastPlayerSeen >= 2 && t >= healPausedUntil
         pickupBlockedUntil = pickupBlockedUntil.filter { $0.value > t }
         chestBlockedUntil = chestBlockedUntil.filter { $0.value > t }
+        // Presses count toward one item or chest; once the panel names something else, that one is over.
+        if let name = o.prompt?.name { interactPresses = interactPresses.filter { $0.key == name } }
         arriving.removeAll { t >= $0.until }
+        countStacks(o, now: t)
+        if let p = o.prompt { if let count = p.count { badge = (p.name, count) } else if badge?.name != p.name { badge = nil } }
         noAmmoUntil = noAmmoUntil.filter { $0.value > t }
         // A gun read as out of rounds while in hand stays out of the idle choice; unselected, its rounds are never read.
         if let slot = o.selected, profile(slot)?.kind == .weapon, slot.ammo == 0, slot.reserveAmmo == 0 { noAmmoUntil[slot.index] = t + 60 }
@@ -238,11 +262,14 @@ public final class Coordinator {
             // its drink time has passed and health or shield rose (a hybrid's gains start a moment later).
             if slot!.isKnownEmpty || elapsed >= h.duration + 0.15 && (gained >= 1 || (slot!.count < h.count && slot!.confidence >= 0.98)) {
                 heal = nil; cooldownUntil = t + 0.2; healAttempts = []
+                if let held = stacks[h.slot], held.item == h.item {
+                    stacks[h.slot] = StackCount(item: h.item, count: max(1, held.count - 1), known: held.known && held.count > 1)
+                }
                 if let item = profiles[h.item], item.overTime > 0 {
                     let gain = HealPlanner.restored(item, health: min(100, h.health + earlier.health), shield: min(100, h.shield + earlier.shield))
                     let seen = min(gained, gain.health + gain.shield)
                     let share = gain.health + gain.shield > 0 ? gain.health / (gain.health + gain.shield) : 0.5
-                    arriving.append((max(0, gain.health - seen * share), max(0, gain.shield - seen * (1 - share)), t, t + item.overTime))
+                    arriving.append((h.item, max(0, gain.health - seen * share), max(0, gain.shield - seen * (1 - share)), t, t + item.overTime))
                 }
                 if !slot!.isKnownEmpty { recovery = nil } // Retain the remaining stack.
                 return idle(o.timestamp, "Healing confirmed")
@@ -259,60 +286,83 @@ public final class Coordinator {
             case let .selection(slot, settle, deadline):
                 if o.selectedSlot == slot && o.selectedSlotConfidence >= 0.98 && t >= settle { pending = nil }
                 else if t >= deadline { pending = nil; recovery = nil; cooldownUntil = t + 1; return idle(o.timestamp, "Slot selection timed out") }
+                // A slot switch on its way does not hold up a chest or an item for a free slot; while it brings a potion to
+                // you low on health, only another potion.
+                else if !threatened, let decision = takeLoot(o, now: t, safeToHeal: safeToHeal, swapWait: "waiting for slot \(slot)",
+                                                             potionsOnly: healPlan != nil && Policy.lowOnHealth(o, settings)) { return decision }
                 else { return idle(o.timestamp, "Waiting for selected slot") }
-            case let .pickup(name, before, deadline):
-                if Self.inventoryGained(from: before, to: o.inventory) {
-                    pending = nil; cooldownUntil = t + 0.2
+            case let .pickup(name, item, amount, before, deadline):
+                let gained = Self.inventoryGained(from: before, to: o.inventory)
+                // Stack counts are rarely readable, so the item leaving the panel also means it was taken (or you walked on).
+                if gained || o.prompt.map({ $0.name != name }) ?? !o.promptVisible {
+                    pending = nil; interactPresses[name] = nil
+                    if let item { countPickup(item, amount: amount, before: before, in: o, now: t) }
+                    if gained { cooldownUntil = t + 0.2 } // Only a swap waits for the inventory to settle; see `takeLoot`.
                     pickupBlockedUntil[name] = t + 0.6 // Another stack of the same item may follow.
-                    if recovery?.consumed != nil { recovery = nil }
-                    return idle(o.timestamp, "Pickup confirmed")
+                    if gained, recovery?.consumed != nil { recovery = nil }
+                    // The next item or chest on the panel is dealt with in this very frame.
+                    if !Self.lootShowing(o) { return idle(o.timestamp, gained ? "Pickup confirmed" : "\(name) taken or left behind") }
+                } else if t >= deadline {
+                    pending = nil
+                    if interactPresses[name] ?? 0 >= Self.interactTries {
+                        interactPresses[name] = nil; recovery = nil; pickupBlockedUntil[name] = t + Self.interactBlock
+                        return idle(o.timestamp, "\(name) not picked up after \(Self.interactTries) presses; not pressing again for \(Int(Self.interactBlock)) s")
+                    }
+                    // Still showing: the game may have missed the press, and the item is pressed for again below.
+                } else {
+                    return idle(o.timestamp, "Waiting for pickup confirmation")
                 }
-                if t >= deadline {
-                    pending = nil; recovery = nil; cooldownUntil = t + 0.5
-                    pickupBlockedUntil[name] = t + 3
-                    return idle(o.timestamp, "Pickup not confirmed; no repeated interact press")
-                }
-                return idle(o.timestamp, "Waiting for pickup confirmation")
             case let .reload(slot, deadline):
                 if (o.slot(slot)?.ammo ?? 0) > 0 || o.selectedSlot != slot { pending = nil }
                 else if t >= deadline { pending = nil; cooldownUntil = t + 1; return idle(o.timestamp, "Reload not confirmed") }
                 else { return idle(o.timestamp, "Reloading") }
             case let .opening(name, deadline):
                 if o.prompt?.kind != .chest || o.prompt?.name != name {
-                    // Opened (its loot or nothing is under you now), or you walked on.
-                    pending = nil; cooldownUntil = t + 0.3
-                    return idle(o.timestamp, "Chest prompt gone; \(name) opened or left behind")
+                    // Opened (its loot or nothing is under you now), or you walked on. Its loot is taken in this very frame.
+                    pending = nil; interactPresses[name] = nil
+                    if !Self.lootShowing(o) { return idle(o.timestamp, "Chest prompt gone; \(name) opened or left behind") }
+                } else if t >= deadline {
+                    pending = nil
+                    if interactPresses[name] ?? 0 >= Self.interactTries {
+                        interactPresses[name] = nil; chestBlockedUntil[name] = t + Self.interactBlock
+                        return idle(o.timestamp, "\(name) did not open; not pressing again for \(Int(Self.interactBlock)) s")
+                    }
+                    // Still closed: the game may have missed the press, and the chest is pressed again below.
+                } else {
+                    return idle(o.timestamp, "Opening \(name)")
                 }
-                if t >= deadline {
-                    pending = nil; chestBlockedUntil[name] = t + 3
-                    return idle(o.timestamp, "\(name) did not open; not pressing again for 3 s")
-                }
-                return idle(o.timestamp, "Opening \(name)")
             case let .holding(name, lastSeen, deadline):
                 let showing = o.prompt?.kind == .chest && o.prompt?.name == name
                 // Hold through a frame or two without any panel. A panel showing anything else, even text not read yet
                 // (spilled loot, a door), ends the hold at once: interact must not act on it.
                 if (o.promptVisible || o.prompt != nil) && !showing || !showing && t - lastSeen > 0.5 {
-                    pending = nil; cooldownUntil = t + 0.3
-                    return idle(o.timestamp, "\(name) opened or left behind")
-                }
-                if t >= deadline {
+                    pending = nil
+                    if !Self.lootShowing(o) { return idle(o.timestamp, "\(name) opened or left behind") }
+                } else if t >= deadline {
                     pending = nil; chestBlockedUntil[name] = t + 5
                     return idle(o.timestamp, "\(name) did not open; not trying again for 5 s")
+                } else {
+                    pending = .holding(name: name, lastSeen: showing ? t : lastSeen, deadline: deadline)
+                    return Decision(o.timestamp, [.holdOpen(name)], "Holding interact at \(name)")
                 }
-                pending = .holding(name: name, lastSeen: showing ? t : lastSeen, deadline: deadline)
-                return Decision(o.timestamp, [.holdOpen(name)], "Holding interact at \(name)")
             }
         }
         // An opponent in the open is engaged at once, without waiting out a settling period.
         if features.combat, let decision = combat(o, now: t) { return decision }
+        let swapWait = healPlan != nil ? "swapping once healed" : t < cooldownUntil ? "waiting for the game to settle" : nil
+        // Low on health, a potion that helps comes first: picking one up, then drinking, then any other loot.
+        if !threatened, Policy.lowOnHealth(o, settings) {
+            if let decision = takeLoot(o, now: t, safeToHeal: safeToHeal, swapWait: swapWait, potionsOnly: true) { return decision }
+            if features.healing, t >= cooldownUntil, let decision = healing(o, now: t, safeToHeal: safeToHeal) { return decision }
+        }
+        if !threatened, let decision = takeLoot(o, now: t, safeToHeal: safeToHeal, swapWait: swapWait) { return decision }
         guard t >= cooldownUntil else { return idle(o.timestamp, "Waiting for the game to settle") }
         if threatened { return idle(o.timestamp, holdReason(o) ?? "Threat visible; withholding looting and healing") }
 
         if let r = recovery, r.consumed != nil {
             guard let slot = o.slot(r.slot), slot.isKnownEmpty else { recovery = nil; return idle(o.timestamp, "Recovery slot is no longer empty") }
-            if features.loot, let prompt = Policy.pickupPrompt(o), let id = prompt.itemID, Self.sameItem(id, r.weapon) {
-                return pickup(prompt, replacing: nil, in: o, now: t)
+            if features.loot, let prompt = Policy.pickupPrompt(o), let id = prompt.itemID, Self.sameItem(id, r.weapon), pickupBlockedUntil[prompt.name] == nil {
+                return pickup(prompt, replacing: nil, in: o, now: t, reason: "Pick up \(prompt.name) again after healing")
             }
         }
 
@@ -321,8 +371,6 @@ public final class Coordinator {
             priorWeaponSlot = nil
             if o.selectedSlot != slotID { return select(slot, in: o, now: t, reason: "Restore weapon after healing") }
         }
-        if features.loot, let decision = loot(o, now: t, safeToHeal: safeToHeal) { return decision }
-        if features.chests, let decision = openChest(o, now: t) { return decision }
         // Reload an empty selected firearm when there is a quiet opportunity.
         if features.combat, let slot = o.selected, let p = profile(slot), p.kind == .weapon,
            slot.ammo == 0, (slot.reserveAmmo ?? 0) > 0 {
@@ -419,13 +467,63 @@ public final class Coordinator {
         health = min(100, health + coming.health); shield = min(100, shield + coming.shield)
         let held = o.inventory.compactMap { slot -> (slot: InventorySlot, item: ItemProfile)? in
             guard let p = profile(slot), p.kind == .healing, slot.count > 0 else { return nil }
+            // A hybrid drunk while the last one's health and shield are still arriving is wasted: the effect does not stack.
+            if p.overTime > 0, arriving.contains(where: { $0.item == p.id && t < $0.until }) { return nil }
             return (slot, p)
         }
-        let stacks = held.map { HealPlanner.Stack($0.item, count: $0.slot.count) }
+        let supply = held.map { entry -> HealPlanner.Stack in
+            let counted = stacks[entry.slot.index].flatMap { $0.item == entry.item.id ? $0.count : nil }
+            return HealPlanner.Stack(entry.item, count: counted ?? entry.slot.count)
+        }
         let thresholds = continuing ? HealPlanner.continuing : (Policy.minHealingBenefit, 0)
-        guard let first = HealPlanner.plan(health: health, shield: shield, stacks: stacks, minimumBenefit: thresholds.0, slack: thresholds.1).first else { return nil }
+        guard let first = HealPlanner.plan(health: health, shield: shield, stacks: supply, minimumBenefit: thresholds.0, slack: thresholds.1).first else { return nil }
         let holding = held.filter { $0.item.id == first.id }
         return holding.first { $0.slot.index == o.selectedSlot } ?? holding.first
+    }
+
+    /// Keeps `stacks` in step with the inventory. A count read off the slot wins. A stack that appears is the pickup just
+    /// made, or else one ground stack (not `known`). An emptied or changed slot starts over.
+    private func countStacks(_ o: Observation, now t: Double) {
+        if let a = arrivingStack, t > a.until { arrivingStack = nil }
+        for slot in o.inventory where (2...6).contains(slot.index) && slot.confidence >= 0.98 {
+            let wasEmpty = seenEmpty.contains(slot.index)
+            if slot.isKnownEmpty { seenEmpty.insert(slot.index) } else { seenEmpty.remove(slot.index) }
+            guard let id = slot.itemID, let p = profiles[id], p.kind == .healing else { stacks[slot.index] = nil; continue }
+            let cap = p.maxStack ?? Int.max
+            if slot.count > 1 { stacks[slot.index] = StackCount(item: id, count: min(slot.count, cap), known: true); continue }
+            guard stacks[slot.index]?.item != id else { continue }
+            if let a = arrivingStack, a.item == id {
+                stacks[slot.index] = StackCount(item: id, count: min(a.amount, cap), known: true); arrivingStack = nil
+            } else {
+                stacks[slot.index] = StackCount(item: id, count: min(p.groundStack ?? 1, cap), known: wasEmpty && p.groundStack != nil)
+            }
+        }
+    }
+
+    /// Counts a consumable pickup: into the slot that gained it, else onto the stack of it with room, else into the slot
+    /// it shows up in shortly.
+    private func countPickup(_ item: String, amount: Int, before: [InventorySlot], in o: Observation, now t: Double) {
+        guard let p = profiles[item], p.kind == .healing else { return }
+        let cap = p.maxStack ?? Int.max
+        if let slot = o.inventory.first(where: { s in (2...6).contains(s.index) && s.itemID == item && before.first { $0.index == s.index }?.itemID != item }) {
+            stacks[slot.index] = StackCount(item: item, count: min(amount, cap), known: true)
+        } else if let index = stacks.filter({ $0.value.item == item && $0.value.count < cap }).keys.min() {
+            stacks[index]!.count = min(cap, stacks[index]!.count + amount)
+        } else {
+            arrivingStack = (item, amount, t + 1.5)
+        }
+    }
+
+    /// How many of the item the panel offers: its badge ("x2"), read now or earlier while it was on the panel, else one
+    /// ground stack (2 small shields or hybrids, 1 big shield).
+    private func stackSize(_ prompt: InteractionPrompt, _ item: ItemProfile) -> Int {
+        prompt.count ?? (badge?.name == prompt.name ? badge?.count : nil) ?? item.groundStack ?? 1
+    }
+
+    /// Free places in the stack this slot holds; nil when its count is a guess or the item's stack size is unknown.
+    private func stackRoom(_ slot: InventorySlot) -> Int? {
+        guard let id = slot.itemID, let cap = profiles[id]?.maxStack, let held = stacks[slot.index], held.item == id, held.known else { return nil }
+        return cap - held.count
     }
 
     /// Why players in view are not engaged, for the status line.
@@ -446,11 +544,17 @@ public final class Coordinator {
         guard let x = ItemCatalog.parseWeaponID(a), let y = ItemCatalog.parseWeaponID(b), x == y else { return false }
         return ItemCatalog.modelID(in: a) == nil || ItemCatalog.modelID(in: b) == nil
     }
-    /// A slot from 2 to 6 now holds a different item or a larger stack.
+    /// The panel names a chest or a recognized item to decide on.
+    static func lootShowing(_ o: Observation) -> Bool { Policy.pickupPrompt(o) != nil || Policy.chestPrompt(o) != nil }
+    /// A slot from 2 to 6 now holds a different item or a larger stack, or anything at all where it was empty.
     static func inventoryGained(from before: [InventorySlot], to after: [InventorySlot]) -> Bool {
         after.contains { slot in
-            guard (2...6).contains(slot.index), slot.confidence >= 0.98, slot.itemID != nil else { return false }
-            guard let old = before.first(where: { $0.index == slot.index }) else { return true }
+            guard (2...6).contains(slot.index) else { return false }
+            let old = before.first { $0.index == slot.index }
+            // A new item counts before its icon is recognized.
+            if old?.isKnownEmpty == true && !slot.isKnownEmpty && slot.confidence > 0 { return true }
+            guard slot.confidence >= 0.98, slot.itemID != nil else { return false }
+            guard let old else { return true }
             return old.itemID != slot.itemID || slot.count > old.count
         }
     }
@@ -525,33 +629,59 @@ public final class Coordinator {
         return Decision(o.timestamp, [.aim(aim),.fire], "Engage enemy at \(band.rawValue) range with \(p.name)")
     }
 
-    /// Presses interact for the prompt's item. With a free slot the game fills it; a full
-    /// inventory swaps out the selected slot, so the slot to replace is selected first.
-    private func pickup(_ prompt: InteractionPrompt, replacing slot: InventorySlot?, in o: Observation, now t: Double) -> Decision {
-        if let slot, o.selectedSlot != slot.index || o.selectedSlotConfidence < 0.98 {
-            return select(slot, in: o, now: t, reason: "Select slot \(slot.index) to swap for \(prompt.name)")
-        }
-        pending = .pickup(name: prompt.name, before: o.inventory, deadline: t + 1.2)
-        pickupBlockedUntil[prompt.name] = t + 3
-        return Decision(o.timestamp, [.releaseAll, .pickup(prompt.name)], "Pick up \(prompt.name) (\(prompt.subtitle)); awaiting inventory confirmation")
+    /// Opening a chest or taking an item is one key press, and the loot stays behind once you walk on, so it comes before
+    /// heals and settling times: it never changes the selected slot. A swap into a full inventory does change it (the game
+    /// swaps out the selected item), so it waits while `swapWait` says why.
+    /// - Parameter potionsOnly: only a consumable on the panel, for when you are low on health and a heal comes next.
+    private func takeLoot(_ o: Observation, now t: Double, safeToHeal: Bool, swapWait: String?, potionsOnly: Bool = false) -> Decision? {
+        if features.loot, let decision = loot(o, now: t, safeToHeal: safeToHeal, swapWait: swapWait, potionsOnly: potionsOnly) { return decision }
+        if !potionsOnly, features.chests, let decision = openChest(o, now: t) { return decision }
+        return nil
     }
 
-    /// Presses interact once at a chest or crate; its loot then lies around it, where the item prompts take over.
-    /// An air drop opens after about 5 s at it, so interact is held until its prompt goes away, for up to 8 s.
+    /// Presses interact for the prompt's item. With a free slot the game fills it; a full
+    /// inventory swaps out the selected slot, so the slot to replace is selected first.
+    private func pickup(_ prompt: InteractionPrompt, replacing slot: InventorySlot?, in o: Observation, now t: Double, reason: String) -> Decision {
+        if let slot, o.selectedSlot != slot.index || o.selectedSlotConfidence < 0.98 {
+            // Interact needs the slot selected, not the gun ready to fire: no switch delay.
+            return select(slot, in: o, now: t, reason: "Select slot \(slot.index) to swap for \(prompt.name)", settle: 0)
+        }
+        let press = (interactPresses[prompt.name] ?? 0) + 1
+        interactPresses[prompt.name] = press
+        let amount = prompt.itemID.flatMap { profiles[$0] }.map { stackSize(prompt, $0) } ?? 1
+        pending = .pickup(name: prompt.name, item: prompt.itemID, amount: amount, before: o.inventory, deadline: t + Self.interactRetry)
+        pickupBlockedUntil[prompt.name] = t + Self.interactRetry
+        return Decision(o.timestamp, [.releaseAll, .pickup(prompt.name)], press > 1 ? "\(reason) (press \(press))" : reason)
+    }
+
+    /// Presses interact at a chest or crate; its loot then lies around it, where the item prompts take over. A chest
+    /// still closed after `interactRetry` is pressed again. An air drop opens after about 5 s at it, so interact is held
+    /// until its prompt goes away, for up to 8 s.
     private func openChest(_ o: Observation, now t: Double) -> Decision? {
         guard let prompt = Policy.chestPrompt(o), chestBlockedUntil[prompt.name] == nil else { return nil }
-        chestBlockedUntil[prompt.name] = t + 2.5
         if Policy.chestNeedsHold(prompt) {
+            chestBlockedUntil[prompt.name] = t + 2.5
             pending = .holding(name: prompt.name, lastSeen: t, deadline: t + 8)
             return Decision(o.timestamp, [.releaseAll, .holdOpen(prompt.name)], "Hold interact at \(prompt.name); stand still")
         }
-        pending = .opening(name: prompt.name, deadline: t + 1.5)
-        return Decision(o.timestamp, [.releaseAll, .open(prompt.name)], "Open \(prompt.name)")
+        let press = (interactPresses[prompt.name] ?? 0) + 1
+        interactPresses[prompt.name] = press
+        chestBlockedUntil[prompt.name] = t + Self.interactRetry
+        pending = .opening(name: prompt.name, deadline: t + Self.interactRetry)
+        return Decision(o.timestamp, [.releaseAll, .open(prompt.name)], press > 1 ? "Open \(prompt.name) (press \(press))" : "Open \(prompt.name)")
     }
 
-    private func loot(_ o: Observation, now t: Double, safeToHeal: Bool) -> Decision? {
-        guard let prompt = Policy.pickupPrompt(o), let id = prompt.itemID, let incoming = profiles[id], incoming.verified else { return nil }
-        func skip(_ why: String) -> Decision? { lootNote = "Not picking up \(prompt.name): \(why)"; return nil }
+    /// Decides on the item the prompt names, read by text recognition ("M4 / Epic AR"): a gun is weighed by its place in
+    /// the gun ranking and its rarity (`ItemProfile.power`) against the gun of its range it would join or replace.
+    private func loot(_ o: Observation, now t: Double, safeToHeal: Bool, swapWait: String?, potionsOnly: Bool = false) -> Decision? {
+        guard let prompt = Policy.pickupPrompt(o), let id = prompt.itemID, let incoming = profiles[id], incoming.verified,
+              !potionsOnly || incoming.kind == .healing else { return nil }
+        func skip(_ why: String) -> Decision? { lootNote = "Not picking up \(incoming.name): \(why)"; return nil }
+        func take(replacing slot: InventorySlot? = nil, _ reason: String) -> Decision? {
+            if slot != nil, let swapWait { return skip(swapWait) }
+            return pickup(prompt, replacing: slot, in: o, now: t, reason: reason)
+        }
+        func name(_ slot: InventorySlot) -> String { profile(slot)?.name ?? "slot \(slot.index)" }
         guard pickupBlockedUntil[prompt.name] == nil else { return skip("just tried") }
         let slots = o.inventory.filter { (2...6).contains($0.index) }
         guard slots.count == 5 else { return skip("inventory not fully read") }
@@ -564,32 +694,56 @@ public final class Coordinator {
             guard let role = incoming.role else { return skip("launchers and special weapons stay manual") }
             let sameRole = weapons.filter { profile($0)?.role == role }
             if let worst = sameRole.min(by: { Self.value(profile($0)!) < Self.value(profile($1)!) }) {
-                guard Self.value(incoming) > Self.value(profile(worst)!) + Self.upgradeMargin else { return skip("not better than \(profile(worst)!.name)") }
-                return pickup(prompt, replacing: empty.isEmpty ? worst : nil, in: o, now: t)
+                guard Self.value(incoming) > Self.value(profile(worst)!) + Self.upgradeMargin else { return skip("not better than \(name(worst))") }
+                return empty.isEmpty ? take(replacing: worst, "Pick up \(incoming.name) in place of \(name(worst))")
+                    : take("Pick up \(incoming.name): better than \(name(worst))")
             }
-            if !empty.isEmpty { return pickup(prompt, replacing: nil, in: o, now: t) }
+            if !empty.isEmpty { return take("Pick up \(incoming.name) for \(role.rawValue) range") }
             // Full: give up a duplicate-role weapon, then a consumable beyond the kept minimum.
             let duplicates = weapons.filter { slot in weapons.filter { profile($0)?.role == profile(slot)?.role }.count > 1 }
             if let victim = duplicates.min(by: { Self.value(profile($0)!) < Self.value(profile($1)!) }) {
-                return pickup(prompt, replacing: victim, in: o, now: t)
+                return take(replacing: victim, "Pick up \(incoming.name) for \(role.rawValue) range in place of \(name(victim))")
             }
             if heals.count > settings.minHealSlots,
                let victim = heals.min(by: { Policy.healingBenefit(profile($0)!, in: o) < Policy.healingBenefit(profile($1)!, in: o) }) {
-                return pickup(prompt, replacing: victim, in: o, now: t)
+                return take(replacing: victim, "Pick up \(incoming.name) for \(role.rawValue) range in place of \(name(victim))")
             }
             return skip(slots.contains { $0.confidence < 0.98 } ? "inventory full and some slots unrecognized" : "inventory full")
         case .healing:
-            if heals.contains(where: { $0.itemID == id }) { return pickup(prompt, replacing: nil, in: o, now: t) } // Stacks.
-            // Keep enough free slots for the weapon roles still missing.
-            if empty.count > missingRoles.count { return pickup(prompt, replacing: nil, in: o, now: t) }
-            // A temporary swap is restricted to an observed singleton. An unknown stack must not displace a weapon.
-            if features.healing, safeToHeal, empty.isEmpty, prompt.count ?? 1 == 1, Policy.healingBenefit(incoming, in: o) >= Policy.minHealingBenefit,
-               !heals.contains(where: { Policy.healingBenefit(profile($0)!, in: o) >= Policy.minHealingBenefit }),
-               let slot = weapons.min(by: { Self.value(profile($0)!) < Self.value(profile($1)!) }), let weapon = slot.itemID {
-                if recovery == nil { recovery = Recovery(slot: slot.index, weapon: weapon, consumable: id, created: t) }
-                return pickup(prompt, replacing: slot, in: o, now: t)
+            let amount = stackSize(prompt, incoming)
+            let helps = Policy.healingBenefit(incoming, in: o) >= Policy.minHealingBenefit
+            let urgent = helps && Policy.lowOnHealth(o, settings)
+            let same = heals.filter { $0.itemID == id }
+            // A stack of it with room takes it without a slot of its own: big shields stack to 2, small shields and hybrids to 4.
+            if let stack = same.first(where: { (stackRoom($0) ?? 0) > 0 }), let held = stacks[stack.index] {
+                return take("Pick up \(incoming.name): \(held.count) of \(incoming.maxStack ?? held.count) held" + (urgent ? ", low on health" : ""))
             }
-            return skip(empty.isEmpty ? "inventory full" : "keeping free slots for missing guns")
+            // A stack whose count is a guess may be full. With a free slot the item lands there at worst; with none the game
+            // would swap out the selected item instead, perhaps a gun.
+            if same.contains(where: { stackRoom($0) == nil }) {
+                if !empty.isEmpty { return take("Pick up \(incoming.name)" + (urgent ? ": low on health" : "")) }
+                return skip("its stack may be full, and the inventory is full")
+            }
+            let stacksFull = !same.isEmpty ? "its stack is full; " : ""
+            // Keep enough free slots for the weapon roles still missing, unless you are low on health and it helps now.
+            if empty.count > missingRoles.count { return take("Pick up \(incoming.name)") }
+            if urgent, !empty.isEmpty { return take("Pick up \(incoming.name): low on health") }
+            // Full inventory, nothing held that helps now, and a quiet moment to drink it: make room.
+            if features.healing, safeToHeal, empty.isEmpty, helps, !heals.contains(where: { Policy.healingBenefit(profile($0)!, in: o) >= Policy.minHealingBenefit }) {
+                // Low on health, a consumable that cannot help now goes first; it is not picked up again.
+                if urgent, let victim = heals.min(by: { profile($0)!.keepValue < profile($1)!.keepValue }) {
+                    return take(replacing: victim, "Swap \(name(victim)) for \(incoming.name): low on health")
+                }
+                // Otherwise the weakest gun, to be picked up again once the slot is drunk empty: only for a stack that will all
+                // be drunk now (a single item, or when low, all the doses the heal plan would take).
+                let drunk = HealPlanner.plan(health: o.health ?? 100, shield: o.shield ?? 100, stacks: [HealPlanner.Stack(incoming, count: amount)]).count
+                if amount == 1 || urgent && drunk >= amount, let slot = weapons.min(by: { Self.value(profile($0)!) < Self.value(profile($1)!) }), let weapon = slot.itemID {
+                    if let swapWait { return skip(swapWait) }
+                    if recovery == nil { recovery = Recovery(slot: slot.index, weapon: weapon, consumable: id, created: t) }
+                    return take(replacing: slot, "Swap \(name(slot)) for \(incoming.name) to heal")
+                }
+            }
+            return skip(stacksFull + (empty.isEmpty ? "inventory full" : "keeping free slots for missing guns"))
         default:
             return nil
         }

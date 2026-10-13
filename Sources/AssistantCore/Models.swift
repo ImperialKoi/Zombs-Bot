@@ -32,6 +32,9 @@ public struct ItemProfile: Codable, Equatable, Sendable {
     public var keepValue: Double = 0
     /// Seconds over which a consumable's gains arrive after the drink; 0 means at once.
     public var overTime: Double = 0
+    /// Most a slot holds of this consumable, and how many one ground stack holds; nil when not known.
+    public var maxStack: Int?
+    public var groundStack: Int?
     public var weaponClass: WeaponClass?
     public var rarity: Rarity?
     /// Fire only above this estimated hit chance; nil uses `Policy.minHitProbability`.
@@ -70,6 +73,8 @@ public struct ItemProfile: Codable, Equatable, Sendable {
         useDuration = try c.decodeIfPresent(Double.self, forKey: .useDuration) ?? 0
         keepValue = try c.decodeIfPresent(Double.self, forKey: .keepValue) ?? 0
         overTime = try c.decodeIfPresent(Double.self, forKey: .overTime) ?? 0
+        maxStack = try c.decodeIfPresent(Int.self, forKey: .maxStack)
+        groundStack = try c.decodeIfPresent(Int.self, forKey: .groundStack)
         weaponClass = try c.decodeIfPresent(WeaponClass.self, forKey: .weaponClass)
         rarity = try c.decodeIfPresent(Rarity.self, forKey: .rarity)
         minHitProbability = try c.decodeIfPresent(Double.self, forKey: .minHitProbability)
@@ -83,6 +88,7 @@ public struct ItemProfile: Codable, Equatable, Sendable {
         && shotInterval >= 0.03 && switchDelay >= 0.05 && maxRange >= minRange && healthCap <= 100 && shieldCap <= 100
         && (minHitProbability.map { $0.isFinite && $0 > 0 && $0 <= 1 } ?? true) && zoom.isFinite && (0.5...3).contains(zoom)
         && (power?.isFinite ?? true) && edge.isFinite
+        && (maxStack ?? 1) >= 1 && (groundStack ?? 1) >= 1 && (groundStack ?? 1) <= (maxStack ?? Int.max)
     }
 }
 

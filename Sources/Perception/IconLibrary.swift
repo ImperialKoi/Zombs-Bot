@@ -79,7 +79,7 @@ public final class IconLibrary: @unchecked Sendable {
         if close.contains(where: { $0.key.kind != top.key.kind || $0.key.weaponClass != top.key.weaponClass || $0.key.healID != top.key.healID }) { return nil }
         // Another gun of the same class about as close: the class is certain, the gun is not. A name decides how good
         // the gun is, so it is left out rather than guessed. Names that differ only in OCR'd look-alikes are one gun.
-        if top.key.kind == .weapon, close.contains(where: { ItemCatalog.nameKey($0.key.name) != ItemCatalog.nameKey(top.key.name) }) {
+        if top.key.kind == .weapon, close.contains(where: { ItemCatalog.shapeKey($0.key.name) != ItemCatalog.shapeKey(top.key.name) }) {
             var unnamed = top.key; unnamed.name = ""
             return (unnamed, top.value)
         }

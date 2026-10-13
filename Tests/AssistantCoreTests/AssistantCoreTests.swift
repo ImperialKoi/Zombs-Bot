@@ -134,12 +134,18 @@ struct AssistantCoreTests {
         expectTrue(step(engine(),o).intents.contains(.fire))
         expectTrue(ActionGuard(profiles:engine().profiles).permits(.fire,observation:o,now:0,aim:enemy().position))
     }
+    /// A heal's slot switch that never shows, which leaves a settling period of a second.
+    func timedOutHealSelection()->(Coordinator,Observation) {
+        let c=engine();var o=observation();o.health=20;o.inventory[2] = .init(3,itemID:"med",count:1)
+        _=step(c,o);o.timestamp=2.1
+        expectTrue(step(c,o).intents.contains(.selectSlot(3)))
+        o.timestamp=3.2;expectEqual(step(c,o).reason,"Slot selection timed out")
+        o.timestamp=3.3;expectEqual(step(c,o).reason,"Waiting for the game to settle")
+        return (c,o)
+    }
     @Test func testCombatDoesNotWaitOutSettlingPeriods() {
-        let c=engine();var o=observation();o.prompt=itemPrompt("Med Kit","med")
-        expectTrue(step(c,o).intents.contains(.pickup("Med Kit")))
-        o.timestamp=1.3;expectEqual(step(c,o).reason,"Pickup not confirmed; no repeated interact press")
-        o.timestamp=1.4;expectEqual(step(c,o).reason,"Waiting for the game to settle")
-        o.timestamp=1.45;o.prompt=nil;o.players=[enemy()];expectTrue(step(c,o).intents.contains(.fire))
+        var (c,o)=timedOutHealSelection()
+        o.timestamp=3.35;o.players=[enemy()];expectTrue(step(c,o).intents.contains(.fire))
     }
     @Test func testOpponentBeyondEveryRangeStillGetsAFirearm() {
         let c=engine();var o=observation();o.inventory[1] = .init(2,itemID:"shotgun",ammo:5);o.selectedSlot=3
@@ -244,11 +250,25 @@ struct AssistantCoreTests {
             expectEqual(step(engine(),o).intents,[.releaseAll])
         }
     }
-    @Test func testPickupIsSinglePressUntilInventoryChanges() {
+    @Test func testPickupIsPressedAgainOnlyWhileTheItemStillShows() {
+        // The item still on the panel after a press the game missed: pressed again, three times in all, then left alone.
         let c=engine();var o=observation();o.selectedSlot=3;o.prompt=itemPrompt("Med Kit","med")
         expectTrue(step(c,o).intents.contains(.pickup("Med Kit")))
-        o.timestamp=0.1;assertRelease(step(c,o));o.timestamp=1.3;assertRelease(step(c,o));o.timestamp=2.2
-        expectFalse(step(c,o).intents.contains(.pickup("Med Kit")))
+        o.timestamp=0.1;assertRelease(step(c,o))
+        o.timestamp=0.6;expectEqual(step(c,o).intents,[.releaseAll,.pickup("Med Kit")])
+        o.timestamp=1.2;expectEqual(step(c,o).reason,"Pick up Med Kit (press 3)")
+        o.timestamp=1.8;expectEqual(step(c,o).reason,"Med Kit not picked up after 3 presses; not pressing again for 3 s")
+        o.timestamp=2.5;expectFalse(step(c,o).intents.contains(.pickup("Med Kit")))
+        o.timestamp=4.8;expectEqual(step(c,o).reason,"Pick up Med Kit")
+        // An item that leaves the panel was taken, even when its slot shows no change (stack counts are rarely read).
+        let d=engine();o.timestamp=0;o.inventory[2] = .init(3,itemID:"med",count:1)
+        expectTrue(step(d,o).intents.contains(.pickup("Med Kit")))
+        o.timestamp=0.2;o.prompt=nil;o.promptVisible=true;expectEqual(step(d,o).reason,"Waiting for pickup confirmation") // Panel not read yet.
+        o.timestamp=0.3;o.promptVisible=false;expectEqual(step(d,o).reason,"Med Kit taken or left behind")
+        o.timestamp=0.4;o.prompt=itemPrompt("Bandage","bandage");expectTrue(step(d,o).intents.contains(.pickup("Bandage")))
+        // The next item on the panel once one is taken is decided on in that same frame.
+        let e=engine();o.timestamp=0;o.prompt=itemPrompt("Med Kit","med");_=step(e,o)
+        o.timestamp=0.2;o.prompt=itemPrompt("Bandage","bandage");expectEqual(step(e,o).intents,[.releaseAll,.pickup("Bandage")])
     }
     @Test func testPickupConfirmedWhenASlotFills() {
         let c=engine();var o=observation();o.prompt=itemPrompt("Med Kit","med")
@@ -271,8 +291,40 @@ struct AssistantCoreTests {
         o.inventory=[.init(1,itemID:"melee"),.init(2,itemID:"rifle",ammo:20),.init(3,itemID:"shotgun"),.init(4,itemID:"sniper"),.init(5,itemID:"med"),.init(6,itemID:"shield")]
         o.prompt=itemPrompt("SCAR","rifle_gold",.weapon)
         expectTrue(step(c,o).intents.contains(.selectSlot(2)))
-        o.timestamp=0.3;o.selectedSlot=2
-        expectTrue(step(c,o).intents.contains(.pickup("SCAR")))
+        o.timestamp=0.03;assertRelease(step(c,o))
+        // Interact needs the slot selected, not the gun ready to fire: pressed as soon as the selection shows.
+        o.timestamp=0.05;o.selectedSlot=2
+        let d=step(c,o);expectTrue(d.intents.contains(.pickup("SCAR")));expectEqual(d.reason,"Pick up Gold Rifle in place of Rifle")
+    }
+    @Test func testLootGoesBeforeHealsAndSettlingPeriods() {
+        // A settling period holds up heals and swaps, not a chest or an item for a free slot.
+        var (c,o)=timedOutHealSelection()
+        o.timestamp=3.35;o.prompt=chestPrompt();expectEqual(step(c,o).intents,[.releaseAll,.open("Gold Chest")])
+        // A chest is opened while a heal's slot switch is on its way…
+        let d=engine();var p=observation();p.health=60;p.inventory[2] = .init(3,itemID:"med",count:1)
+        _=step(d,p);p.timestamp=2.1;expectTrue(step(d,p).intents.contains(.selectSlot(3)))
+        p.timestamp=2.15;p.prompt=chestPrompt();expectTrue(step(d,p).intents.contains(.open("Gold Chest")))
+        // …unless you are low on health: then the drink comes first, and the chest waits.
+        let low=engine();var l=observation();l.health=20;l.inventory[2] = .init(3,itemID:"med",count:1)
+        _=step(low,l);l.timestamp=2.1;expectTrue(step(low,l).intents.contains(.selectSlot(3)))
+        l.timestamp=2.15;l.prompt=chestPrompt();expectEqual(step(low,l).reason,"Waiting for selected slot")
+        // …and an item is taken before a heal starts: the loot stays behind once you walk on.
+        let e=engine();var q=observation();q.health=20;q.inventory[2] = .init(3,itemID:"med",count:1)
+        _=step(e,q);q.timestamp=2.1;q.prompt=itemPrompt("Bandage","bandage")
+        expectTrue(step(e,q).intents.contains(.pickup("Bandage")))
+        // A swap changes the selected slot, so it waits for a heal under way.
+        let f=engine();var r=observation();r.health=20;r.gunInHand=nil
+        r.inventory=[.init(1,itemID:"melee"),.init(2,itemID:"rifle",ammo:20),.init(3,itemID:"shotgun"),.init(4,itemID:"sniper"),.init(5,itemID:"med"),.init(6,itemID:"shield")]
+        _=step(f,r);r.timestamp=2.1;expectTrue(step(f,r).intents.contains(.selectSlot(5)))
+        r.timestamp=2.35;r.selectedSlot=5;expectEqual(step(f,r).reason,"Stand still: checking that Med Kit is in hand")
+        r.timestamp=2.45;r.prompt=itemPrompt("SCAR","rifle_gold",.weapon)
+        let held=step(f,r);expectFalse(held.intents.contains(.selectSlot(2)));expectEqual(held.reason,"Stand still: checking that Med Kit is in hand")
+    }
+    @Test func testAnItemInAnEmptySlotConfirmsThePickupBeforeItIsRecognized() {
+        let before=[InventorySlot(2,itemID:"rifle"),InventorySlot(3,count:0)]
+        expectTrue(Coordinator.inventoryGained(from:before,to:[InventorySlot(2,itemID:"rifle"),InventorySlot(3,confidence:0.5)]))
+        expectFalse(Coordinator.inventoryGained(from:before,to:before))
+        expectFalse(Coordinator.inventoryGained(from:[InventorySlot(3,confidence:0.5)],to:[InventorySlot(3,confidence:0.5)]))
     }
     @Test func testFullInventoryMissingRoleGivesUpAnExtraConsumable() {
         let c=engine();var o=observation()
@@ -301,19 +353,23 @@ struct AssistantCoreTests {
     func chestPrompt(_ name:String="Gold Chest",stable:Bool=true)->InteractionPrompt {
         InteractionPrompt(name:name,subtitle:"Interact",kind:.chest,stable:stable)
     }
-    @Test func testChestIsOpenedWithOnePressAndNotPressedAgain() {
+    @Test func testChestIsPressedAgainUntilItOpens() {
         let c=engine();var o=observation();o.prompt=chestPrompt()
         expectEqual(step(c,o).intents,[.releaseAll,.open("Gold Chest")])
         o.timestamp=0.1;expectEqual(step(c,o).reason,"Opening Gold Chest")
-        o.timestamp=0.3;o.prompt=itemPrompt("Med Kit","med") // Opened: its loot is under you now.
-        expectEqual(step(c,o).reason,"Chest prompt gone; Gold Chest opened or left behind")
-        o.timestamp=0.7;expectTrue(step(c,o).intents.contains(.pickup("Med Kit")))
-        // A chest that does not open is not pressed again for a while.
+        // Opened: its loot is under you now, and is taken in the same frame, without a settling pause.
+        o.timestamp=0.3;o.prompt=itemPrompt("Med Kit","med");expectTrue(step(c,o).intents.contains(.pickup("Med Kit")))
+        let e=engine();o.timestamp=0;o.prompt=chestPrompt();_=step(e,o)
+        o.timestamp=0.3;o.prompt=nil;expectEqual(step(e,o).reason,"Chest prompt gone; Gold Chest opened or left behind")
+        // A chest still closed was a press the game missed: pressed again, three times in all, then left alone a while.
         let d=engine();o.timestamp=0;o.prompt=chestPrompt("Ammo Chest")
         expectTrue(step(d,o).intents.contains(.open("Ammo Chest")))
-        o.timestamp=1.6;expectEqual(step(d,o).reason,"Ammo Chest did not open; not pressing again for 3 s")
+        o.timestamp=0.3;expectEqual(step(d,o).reason,"Opening Ammo Chest")
+        o.timestamp=0.6;expectEqual(step(d,o).reason,"Open Ammo Chest (press 2)")
+        o.timestamp=1.2;expectEqual(step(d,o).reason,"Open Ammo Chest (press 3)")
+        o.timestamp=1.8;expectEqual(step(d,o).reason,"Ammo Chest did not open; not pressing again for 3 s")
         o.timestamp=3;expectFalse(step(d,o).intents.contains(.open("Ammo Chest")))
-        o.timestamp=4.7;expectTrue(step(d,o).intents.contains(.open("Ammo Chest")))
+        o.timestamp=4.8;expectEqual(step(d,o).reason,"Open Ammo Chest")
     }
     @Test func testChestsWaitForAStablePromptNoThreatAndTheFeature() {
         var o=observation();o.prompt=chestPrompt(stable:false)
@@ -588,6 +644,28 @@ struct AssistantCoreTests {
         expectTrue(catalog.models.allSatisfy { m in Rarity.allCases.allSatisfy { ids.contains(ItemCatalog.weaponID(m.weaponClass,$0,model:m.id)) } })
         expectTrue(catalog.profiles.allSatisfy(\.isValid))
     }
+    @Test func testGunNamesSurviveCommonMisreads() {
+        let catalog=ItemCatalog.standard
+        // Look-alike characters in the prompt's font, and a stray mark beside the name.
+        expectEqual(catalog.weaponID(.smg,.rare,name:"MPS"),"smg:rare:mp5")
+        expectEqual(catalog.weaponID(.smg,.rare,name:"P9O"),"smg:rare:p90")
+        expectEqual(catalog.weaponID(.smg,.epic,name:"Uzl"),"smg:epic:uzi");expectEqual(catalog.weaponID(.smg,.epic,name:"Üzi"),"smg:epic:uzi")
+        expectEqual(catalog.weaponID(.ar,.rare,name:"AR-I5"),"ar:rare:ar15")
+        expectEqual(catalog.weaponID(.ar,.mythic,name:"XMB"),"ar:mythic:xm8")
+        expectEqual(catalog.weaponID(.ar,.mythic,name:"MG3G"),"ar:mythic:mg36")
+        expectEqual(catalog.weaponID(.sniper,.mythic,name:"AVVP"),"sniper:mythic:awp")
+        expectEqual(catalog.weaponID(.sniper,.rare,name:"V55"),"sniper:rare:vss")
+        expectEqual(catalog.weaponID(.shotgun,.uncommon,name:"KSG Shotgun Z"),"shotgun:uncommon:ksg_shotgun") // Read so in a recording.
+        expectEqual(catalog.weaponID(.ar,.rare,name:"M4 E"),"ar:rare:m4")
+        expectEqual(HUDText.prompt(lines:["MPS","Epic SMG"],confidence:1,catalog:catalog)?.itemID,"smg:epic:mp5")
+        // Nothing else is guessed: a short name one letter off, or another class's gun.
+        expectEqual(catalog.weaponID(.ar,.rare,name:"M5"),"ar:rare");expectEqual(catalog.weaponID(.ar,.rare,name:"MP5"),"ar:rare")
+        // No two guns of a class share a shape key, so a look-alike never names the wrong gun.
+        for weaponClass in WeaponClass.allCases {
+            let shapes=catalog.models.filter { $0.weaponClass==weaponClass }.map { m in Set(([m.name]+(m.aliases ?? [])).map(ItemCatalog.shapeKey)) }
+            for (i,a) in shapes.enumerated() { for b in shapes.dropFirst(i+1) { expectEqual(a.intersection(b),[],"\(weaponClass)") } }
+        }
+    }
     @Test func testNamedGunsUseTheWikiStats() {
         let catalog=ItemCatalog.standard
         func gun(_ id:String)->ItemProfile { catalog.profile(id)! }
@@ -631,7 +709,7 @@ struct AssistantCoreTests {
         expectTrue(step(c,o).intents.contains(.selectSlot(3)))
         (c,o)=stocked("smg:rare:mp5","ar:rare:m4","sniper:rare:bolt_mk2");o.prompt=gunPrompt("AK","Rare AR")
         var d=step(c,o);expectFalse(d.intents.contains(.selectSlot(3)));expectFalse(d.intents.contains(.pickup("AK")))
-        expectEqual(d.reason,"Not picking up AK: not better than Rare M4")
+        expectEqual(d.reason,"Not picking up Rare AK: not better than Rare M4")
         // Near equals are not worth a swap: a Legendary Uzi for a Legendary MP5.
         (c,o)=stocked("smg:legendary:mp5","ar:rare:m4","sniper:rare:bolt_mk2");o.prompt=gunPrompt("Uzi","Legendary SMG")
         expectFalse(step(c,o).intents.contains(.selectSlot(2)))
@@ -706,6 +784,114 @@ struct AssistantCoreTests {
             expectFalse(HUDText.prompt(lines:lines,confidence:1,catalog:catalog)?.isItem ?? false)
         }
     }
+    // MARK: Potions
+    func potionPrompt(_ lines:[String])->InteractionPrompt? { HUDText.prompt(lines:lines,confidence:1,catalog:.standard) }
+    /// Catalog guns in slots 2 to 4 (close, medium, long) and the given items in slots 5 and 6, with the rifle in hand.
+    func potionCarrier(_ five:InventorySlot,_ six:InventorySlot)->(Coordinator,Observation) {
+        let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+        var o=observation();o.selectedSlot=3
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"smg:rare:mp5",ammo:30,reserveAmmo:90),.init(3,itemID:"ar:rare:m4",ammo:30,reserveAmmo:90),
+                     .init(4,itemID:"sniper:rare:bolt_mk2",ammo:5,reserveAmmo:10),five,six]
+        return (c,o)
+    }
+    @Test func testLowOnHealthMeansHealthOrHealthAndShieldUnderTheThreshold() {
+        var o=observation()
+        for (hp,shield,low) in [(49.0,100.0,true),(60,30,true),(60,40,false),(100,0,false),(50,50,false)] {
+            o.health=hp;o.shield=shield;expectEqual(Policy.lowOnHealth(o),low,"\(hp)/\(shield)")
+        }
+        o.health=10;o.hudConfidence=0.5;expectFalse(Policy.lowOnHealth(o)) // Only a clear reading counts.
+        expectEqual(ItemCatalog.standard.heal(id:"large_shield")?.maxStack,2);expectEqual(ItemCatalog.standard.heal(id:"large_shield")?.groundStack,1)
+        expectEqual(ItemCatalog.standard.heal(id:"hybrid_potion")?.maxStack,4);expectEqual(ItemCatalog.standard.heal(id:"small_shield")?.groundStack,2)
+        expectEqual(ItemCatalog.standard.heal(id:"large_shield")?.useDuration,5)
+    }
+    @Test func testLowOnHealthAPotionTakesASlotKeptForAGun() {
+        // One free slot, kept for the missing close-range gun.
+        func offer(health:Double)->Decision {
+            let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+            var o=observation();o.selectedSlot=3;o.health=health
+            o.inventory=[.init(1,itemID:"fists"),.init(2,count:0),.init(3,itemID:"ar:rare:m4",ammo:30,reserveAmmo:90),
+                         .init(4,itemID:"sniper:rare:bolt_mk2",ammo:5,reserveAmmo:10),.init(5,itemID:"large_shield"),.init(6,itemID:"small_shield",count:2)]
+            o.prompt=potionPrompt(["Med Kit","Healing"])
+            return step(c,o)
+        }
+        var d=offer(health:100);expectFalse(d.intents.contains(.pickup("Med Kit")))
+        expectEqual(d.reason,"Not picking up Med Kit: keeping free slots for missing guns")
+        d=offer(health:30);expectTrue(d.intents.contains(.pickup("Med Kit")));expectEqual(d.reason,"Pick up Med Kit: low on health")
+    }
+    @Test func testLowOnHealthDrinksBeforeOtherLoot() {
+        func run(health:Double,shield:Double)->Decision {
+            let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+            var o=observation();o.selectedSlot=2;o.health=health;o.shield=shield
+            o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"smg:rare:mp5",ammo:30,reserveAmmo:90),.init(3,itemID:"hybrid_potion",count:2),
+                         .init(4,count:0),.init(5,count:0),.init(6,count:0)]
+            _=step(c,o);o.timestamp=2.1;o.prompt=gunPrompt("M4","Rare AR") // A wanted gun on the panel, in a quiet moment.
+            return step(c,o)
+        }
+        let low=run(health:30,shield:20);expectTrue(low.intents.contains(.selectSlot(3)));expectFalse(low.intents.contains(.pickup("M4")))
+        let fine=run(health:70,shield:40);expectTrue(fine.intents.contains(.pickup("M4"))) // Otherwise loot still goes first.
+    }
+    @Test func testPotionStacksFillToTheirSizeAndNoFurther() {
+        var (c,o)=potionCarrier(.init(5,count:0),.init(6,itemID:"small_shield",count:4))
+        func offer(_ t:Double,_ lines:[String])->Decision { o.timestamp=t;o.prompt=potionPrompt(lines);return step(c,o) }
+        expectTrue(offer(0,["Big Shield","Potion"]).intents.contains(.pickup("Big Shield")))
+        o.timestamp=0.1;o.prompt=nil;o.inventory[4] = .init(5,itemID:"large_shield");expectEqual(step(c,o).reason,"Pickup confirmed")
+        // The inventory is full now, but the big shield's stack has room for one more.
+        var d=offer(0.9,["Big Shield","Potion"]);expectTrue(d.intents.contains(.pickup("Big Shield")));expectEqual(d.reason,"Pick up Big Shield: 1 of 2 held")
+        o.timestamp=1.0;o.prompt=nil;_=step(c,o)
+        d=offer(1.8,["Big Shield","Potion"]);expectFalse(d.intents.contains(.pickup("Big Shield")))
+        expectEqual(d.reason,"Not picking up Big Shield: its stack is full; inventory full")
+        // Four small shields read off the slot are a full stack too.
+        d=offer(2.6,["Small Shield","x2","Potion"]);expectEqual(d.reason,"Not picking up Small Shield: its stack is full; inventory full")
+    }
+    @Test func testAStackOfUnknownSizeIsNotAddedToInAFullInventory() {
+        // One small shield as far as the slot shows: the digits were not read, so the stack may be full. The game would swap
+        // the gun in hand for it if it does not fit.
+        var (c,o)=potionCarrier(.init(5,itemID:"large_shield"),.init(6,itemID:"small_shield",count:1))
+        o.prompt=potionPrompt(["Small Shield","x2","Potion"])
+        var d=step(c,o);expectFalse(d.intents.contains(.pickup("Small Shield")))
+        expectEqual(d.reason,"Not picking up Small Shield: its stack may be full, and the inventory is full")
+        (c,o)=potionCarrier(.init(5,count:0),.init(6,itemID:"small_shield",count:1));o.prompt=potionPrompt(["Small Shield","x2","Potion"])
+        d=step(c,o);expectTrue(d.intents.contains(.pickup("Small Shield"))) // With a free slot it lands there at worst.
+    }
+    @Test func testAStackSeenArrivingIsOneGroundStackUntilYouPressAKey() {
+        // Slot 5 is seen empty, then holds a big shield you picked up: one ground stack, so room for one more.
+        var (c,o)=potionCarrier(.init(5,count:0),.init(6,itemID:"small_shield",count:4))
+        _=step(c,o);o.timestamp=0.2;o.inventory[4] = .init(5,itemID:"large_shield");_=step(c,o)
+        o.timestamp=0.4;o.prompt=potionPrompt(["Big Shield","Potion"])
+        expectEqual(step(c,o).reason,"Pick up Big Shield: 1 of 2 held")
+        // A key you press yourself may have stacked another: the count is a guess again.
+        (c,o)=potionCarrier(.init(5,count:0),.init(6,itemID:"small_shield",count:4))
+        _=step(c,o);o.timestamp=0.2;o.inventory[4] = .init(5,itemID:"large_shield");_=step(c,o)
+        o.timestamp=0.3;o.manualOverride=true;_=step(c,o)
+        o.timestamp=0.4;o.manualOverride=false;o.prompt=potionPrompt(["Big Shield","Potion"])
+        expectEqual(step(c,o).reason,"Not picking up Big Shield: its stack may be full, and the inventory is full")
+    }
+    @Test func testABadgeReadOnceCountsForThePickup() {
+        // A dead player's four hybrids: "x4" is read in one frame, not in the next, where the press happens.
+        var (c,o)=potionCarrier(.init(5,count:0),.init(6,itemID:"small_shield",count:4));o.selectedSlot=3
+        o.prompt=potionPrompt(["Hybrid Potion","x4","Healing"]);o.prompt?.stable=false;_=step(c,o)
+        o.timestamp=0.1;o.prompt=potionPrompt(["Hybrid Potion","Healing"]);expectTrue(step(c,o).intents.contains(.pickup("Hybrid Potion")))
+        o.timestamp=0.2;o.prompt=nil;o.inventory[4] = .init(5,itemID:"hybrid_potion");_=step(c,o)
+        o.timestamp=1.0;o.prompt=potionPrompt(["Hybrid Potion","Healing"])
+        expectEqual(step(c,o).reason,"Not picking up Hybrid Potion: its stack is full; inventory full")
+    }
+    @Test func testLowOnHealthSwapsAPotionThatCannotHelpForOneThatDoes() {
+        // Shield full and health low: the shields cannot help, the med kit can. The cheapest to keep makes room.
+        var (c,o)=potionCarrier(.init(5,itemID:"large_shield"),.init(6,itemID:"small_shield",count:2));o.health=30
+        _=step(c,o);o.timestamp=2.1;o.prompt=potionPrompt(["Med Kit","Healing"])
+        let d=step(c,o);expectTrue(d.intents.contains(.selectSlot(6)));expectEqual(d.reason,"Select slot 6 to swap for Med Kit")
+    }
+    @Test func testASecondHybridWaitsForTheFirstOnesEffect() {
+        // Very low: the first hybrid's 25/25 on their way would not be enough, but a second one now would be wasted.
+        let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+        var o=observation();o.health=10;o.shield=0;o.selectedSlot=3
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"ar:rare",ammo:20,reserveAmmo:50),.init(3,itemID:"hybrid_potion",count:4),.init(4,count:0),.init(5,count:0),.init(6,count:0)]
+        _=step(c,o);o.timestamp=2.1;expectTrue(step(c,o).intents.contains(.useConsumable))
+        o.timestamp=4.3;o.health=11;expectEqual(step(c,o).reason,"Healing confirmed")
+        for t in [4.6,8.0,13.0] { o.timestamp=t;o.health=10+2.5*(t-4.2);o.shield=2.5*(t-4.2);#expect(!step(c,o).intents.contains(.useConsumable),"at \(t) s") }
+        o.timestamp=14.5;o.health=35;o.shield=25;expectTrue(step(c,o).intents.contains(.useConsumable)) // Its effect is over.
+    }
+
     // MARK: Heal planning
     func standardHeals()->[String:ItemProfile] { Dictionary(uniqueKeysWithValues:ItemCatalog.standard.profiles.filter { $0.kind == .healing }.map { ($0.id,$0) }) }
     func plan(_ health:Double,_ shield:Double,_ stock:[String:Int])->[String] {
@@ -785,7 +971,8 @@ struct AssistantCoreTests {
     }
 
     @Test func testTwoPlannedHybridsAreTwoDrinks() {
-        // A small game: holding the potion 2 s drinks one, and each drink adds 25/25 over the next 10 s.
+        // A small game: holding the potion 2 s drinks one, and each drink adds 25/25 over the next 10 s. The second drink
+        // waits for the first one's 10 s to end; the 20 s here leave room for both.
         let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
         var o=observation();o.health=50;o.shield=50;o.selectedSlot=3
         o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"ar:rare",ammo:20,reserveAmmo:50),.init(3,itemID:"hybrid_potion",count:4),.init(4,count:0),.init(5,count:0),.init(6,count:0)]
@@ -907,7 +1094,8 @@ struct AssistantCoreTests {
         o.timestamp=1;expectEqual(step(c,o).intents,[.holdOpen("Air Drop Chest")])
         o.timestamp=1.2;o.prompt=nil;expectEqual(step(c,o).intents,[.holdOpen("Air Drop Chest")]) // A frame without the panel.
         o.timestamp=1.4;o.prompt=chestPrompt("Air Drop Chest");_=step(c,o)
-        o.timestamp=5.2;o.prompt=itemPrompt("AWP","sniper",.weapon);expectEqual(step(c,o).reason,"Air Drop Chest opened or left behind")
+        // Opened: its loot is taken in the same frame (the driver lets go of the held key before tapping it again).
+        o.timestamp=5.2;o.prompt=itemPrompt("AWP","sniper",.weapon);expectEqual(step(c,o).intents,[.releaseAll,.pickup("AWP")])
         let guardrail=ActionGuard(profiles:c.profiles);var p=observation()
         expectTrue(guardrail.permits(.holdOpen("Air Drop Chest"),observation:p,now:0,aim:nil)) // No panel this frame.
         p.prompt=InteractionPrompt(name:"Door",subtitle:"Open",kind:.other)

@@ -11,6 +11,10 @@ final class InputDriver {
     /// Interact held down at an air drop; released by any decision that does not ask for it.
     private var interactHeld = false
     private var pressedKeys=Set<UInt16>()
+    /// When each tapped key may go up. The next frame's decision comes about 18 ms after a tap and used to release it
+    /// then, so a game sampling keys once per frame below 60 fps could miss the press.
+    private var tapEnds:[UInt16:Double]=[:]
+    static let tapDuration=0.06
     private let releaseQueue=DispatchQueue(label:"input.key-release",qos:.userInteractive)
     private var enabled = false
     private var windowID: CGWindowID = 0
@@ -42,7 +46,7 @@ final class InputDriver {
         for intent in decision.intents {
             guard CaptureService.isFocused(windowID), guardrail.permits(intent, observation: o, now: ProcessInfo.processInfo.systemUptime, aim: aim) else { releaseAll(); return }
             switch intent {
-            case .releaseAll: releaseAll()
+            case .releaseAll: releaseHeld()
             case .aim(let point):
                 // `aim` stays the point aimed at, which the guard checks; the mouse only goes as far as the aim circle.
                 aim = point
@@ -58,21 +62,30 @@ final class InputDriver {
                 move(to: press, bounds, content)
                 post(CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: screen(press, bounds, content), mouseButton: .left))
                 mouseHeld = true
-            case .selectSlot(let index): releaseAll(); tap(bindings.slots[index - 1])
-            case .reload: releaseAll(); tap(bindings.reload)
-            case .pickup, .open: releaseAll(); tap(bindings.interact)
+            case .selectSlot(let index): releaseHeld(); tap(bindings.slots[index - 1])
+            case .reload: releaseHeld(); tap(bindings.reload)
+            case .pickup, .open: releaseHeld(); tap(bindings.interact)
             case .holdOpen:
-                if !interactHeld, KeyBindings.allowed.contains(bindings.interact) {
+                // A tap of the same key still going up would end the hold; the next frame starts it instead.
+                if !interactHeld, !pressedKeys.contains(bindings.interact), KeyBindings.allowed.contains(bindings.interact) {
                     post(CGEvent(keyboardEventSource: source, virtualKey: bindings.interact, keyDown: true)); interactHeld = true
                 }
             }
         }
     }
+    /// Lets go of everything at once: stopping, taking over, focus loss, a refused action.
     func releaseAll() {
         lock.lock(); defer { lock.unlock() }
+        releaseHeld(keepingTaps: false)
+    }
+    /// Lets go of what a decision no longer asks for. A tap still inside `tapDuration` goes up on its own schedule.
+    private func releaseHeld(keepingTaps: Bool = true) {
+        lock.lock(); defer { lock.unlock() }
         if mouseHeld { post(CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: CGEvent(source:nil)?.location ?? .zero, mouseButton:.left)); mouseHeld = false }
-        for key in pressedKeys { post(CGEvent(keyboardEventSource:source,virtualKey:key,keyDown:false)) }
-        pressedKeys.removeAll()
+        let now = ProcessInfo.processInfo.systemUptime
+        for key in pressedKeys.filter({ !keepingTaps || now >= tapEnds[$0] ?? 0 }) {
+            post(CGEvent(keyboardEventSource:source,virtualKey:key,keyDown:false)); pressedKeys.remove(key); tapEnds[key] = nil
+        }
         releaseInteract()
         aim = nil
     }
@@ -97,11 +110,15 @@ final class InputDriver {
     }
     private func tap(_ key: UInt16) {
         guard KeyBindings.allowed.contains(key), !pressedKeys.contains(key) else { return }
-        pressedKeys.insert(key)
+        let end = ProcessInfo.processInfo.systemUptime + Self.tapDuration
+        pressedKeys.insert(key); tapEnds[key] = end
         post(CGEvent(keyboardEventSource: source, virtualKey: key, keyDown: true))
-        releaseQueue.asyncAfter(deadline:.now()+0.035) { [weak self] in
+        releaseQueue.asyncAfter(deadline:.now()+Self.tapDuration) { [weak self] in
             guard let self else { return }
             self.lock.lock(); defer { self.lock.unlock() }
+            // Only this tap: the key may have been let go and tapped again meanwhile.
+            guard self.tapEnds[key] == end else { return }
+            self.tapEnds[key] = nil
             if self.pressedKeys.remove(key) != nil { self.post(CGEvent(keyboardEventSource:self.source,virtualKey:key,keyDown:false)) }
         }
     }

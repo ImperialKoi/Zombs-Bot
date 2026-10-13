@@ -206,12 +206,12 @@ These are not weapons, but their icons come from the same atlas and appear in th
 
 | | Item | Notes |
 |---|---|---|
-| <img src="weapons/bandage.png" width="48" alt="Bandage"> | **Bandage** | +15 health up to 75 (wiki: 2.2 s). |
-| <img src="weapons/med_kit.png" width="48" alt="Med Kit"> | **Med Kit** | Heals to full health (wiki: 5 s). |
-| <img src="weapons/small_shield.png" width="48" alt="Small Shield Potion"> | **Small Shield Potion** | +25 shield up to 50 (2 s). |
-| <img src="weapons/big_shield.png" width="48" alt="Big Shield Potion"> | **Big Shield Potion** | +50 shield up to 100 (wiki: 5 s). |
-| <img src="weapons/hybrid_potion.png" width="48" alt="Hybrid Potion"> | **Hybrid Potion** | +25 health and +25 shield over 10 s (2 s). |
-| <img src="weapons/stimpack.png" width="48" alt="Stimpack"> | **Stimpack** | Legendary: +50% movement speed and fire rate for 10 s (1 s). |
+| <img src="weapons/bandage.png" width="48" alt="Bandage"> | **Bandage** | +15 health up to 75; 2.2 s to use. 8 on the ground, 8 at most in a slot. |
+| <img src="weapons/med_kit.png" width="48" alt="Med Kit"> | **Med Kit** | Heals to full health; 5 s. 1 on the ground, 2 in a slot. |
+| <img src="weapons/small_shield.png" width="48" alt="Small Shield Potion"> | **Small Shield Potion** | +25 shield up to 50; 2 s. 2 on the ground, 4 in a slot. |
+| <img src="weapons/big_shield.png" width="48" alt="Big Shield Potion"> | **Big Shield Potion** | +50 shield up to 100; 5 s. 1 on the ground, 2 in a slot. |
+| <img src="weapons/hybrid_potion.png" width="48" alt="Hybrid Potion"> | **Hybrid Potion** | +25 health and +25 shield over 10 s; 2 s. 2 on the ground, 4 in a slot. A second one during those 10 s is wasted. |
+| <img src="weapons/stimpack.png" width="48" alt="Stimpack"> | **Stimpack** | Legendary: +50% movement speed and fire rate for 10 s; 1 s. 1 on the ground, 2 in a slot. The assistant leaves it to you. |
 | <img src="weapons/ammo_small.png" width="48" alt="Small ammo"> | **Small ammo** | SMGs (not the Tommy Gun), pistols except the Deagle, VSS, Minigun, Flamethrower, Goo Gun, Rubber Gun. |
 | <img src="weapons/ammo_medium.png" width="48" alt="Medium ammo"> | **Medium ammo** | Assault rifles and the Tommy Gun. |
 | <img src="weapons/ammo_large.png" width="48" alt="Large ammo"> | **Large ammo** | Snipers except the VSS, Deagle, RPG, Grenade and Gift Launchers, Crossbow, XBow. |
@@ -250,8 +250,8 @@ The catalog (`Sources/AssistantCore/Catalog.swift`) lists the 37 guns a prompt c
   - The Dragunov reloads after every shot.
 - Pistols keep the assistant's fallback role at mid range. In the close or long slot one would only take up space, because the range bands prefer an assault rifle to a pistol.
 - Range, zoom and bullet speed stay class estimates, because the wiki only describes them in words.
-- The Stimpack (+50% movement speed and fire rate for 10 s) is not in the catalog yet.
-- The wiki's use times for the Big Shield (5 s), Med Kit (5 s) and Bandage (2.2 s) differ from the catalog's estimates (4 s, 6 s, 2.5 s). Measure them before changing anything.
+- Potions follow the stack sizes above. Below 50 health, or below 100 health and shield together, a potion that would help is picked up and drunk before any other loot.
+- The Stimpack stays manual. Its only use is just before a fight, which the assistant cannot time.
 
 ## Sources
 

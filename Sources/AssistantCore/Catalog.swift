@@ -86,6 +86,9 @@ public struct HealSpec: Codable, Equatable, Sendable {
     public var overTime: Double?
     /// What the prompt panel says while the item is in your hand, below "Left Click to Consume".
     public var hints: [String]?
+    /// Most a slot holds, and how many one ground stack holds. nil: not known, so a full stack cannot be ruled out.
+    public var maxStack: Int?
+    public var groundStack: Int?
 }
 
 /// Items the assistant can recognize. Weapon IDs are `<class>:<rarity>:<model>` for a gun whose name is in `models`,
@@ -121,21 +124,39 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
     }
     public func weapon(_ weaponClass: WeaponClass) -> WeaponSpec? { weapons.first { $0.weaponClass == weaponClass } }
     public func model(id: String) -> WeaponModel? { models.first { $0.id == id } }
-    /// The gun of this class with this name. Allows one misread letter in a name of five or more letters when no other
-    /// gun is that close; shorter names ("M4", "AK", "UMP") must match exactly.
+    /// The gun of this class with the name text recognition read from the prompt. The read may confuse look-alike
+    /// characters ("MPS" for "MP5", "Uzl" for "Uzi", see `shapeKey`) or carry a stray mark beside the name ("KSG Shotgun
+    /// Z"); a name of five or more letters may also have one other letter wrong. Each step takes a gun only when no other
+    /// gun of the class matches as well, and nothing else is guessed: a short name one letter off ("M5") names no gun.
     public func model(named name: String, weaponClass: WeaponClass?) -> WeaponModel? {
-        let key = Self.nameKey(name)
-        guard !key.isEmpty else { return nil }
         let candidates = models.filter { weaponClass == nil || $0.weaponClass == weaponClass }
         func keys(_ m: WeaponModel) -> [String] { ([m.name] + (m.aliases ?? [])).map(Self.nameKey) }
-        if let exact = candidates.first(where: { keys($0).contains(key) }) { return exact }
-        guard key.count >= 5 else { return nil }
-        let near = candidates.filter { keys($0).contains { HUDText.editDistance($0, key) <= 1 } }
-        return near.count == 1 ? near[0] : nil
+        func unique(_ found: [WeaponModel]) -> WeaponModel? { Set(found.map(\.id)).count == 1 ? found[0] : nil }
+        var words = name.split(whereSeparator: \.isWhitespace).map(String.init)
+        while words.count > 1, Self.nameKey(words.last!).count <= 1 { words.removeLast() }
+        while words.count > 1, Self.nameKey(words.first!).count <= 1 { words.removeFirst() }
+        let whole = Self.nameKey(name), trimmed = Self.nameKey(words.joined())
+        let readings = (trimmed == whole ? [whole] : [whole, trimmed]).filter { !$0.isEmpty }
+        for key in readings { if let m = unique(candidates.filter { keys($0).contains(key) }) { return m } }
+        for key in readings.map(Self.shapeKey) {
+            if let m = unique(candidates.filter { keys($0).map(Self.shapeKey).contains(key) }) { return m }
+        }
+        for key in readings.map(Self.shapeKey) where key.count >= 5 {
+            if let m = unique(candidates.filter { keys($0).contains { HUDText.editDistance(Self.shapeKey($0), key) <= 1 } }) { return m }
+        }
+        return nil
     }
-    /// Lowercased letters and digits, with Cyrillic look-alikes as Latin: "AR-15" is "ar15", and an OCR'd "АК" is "ak".
+    /// Lowercased letters and digits without accents, with Cyrillic look-alikes as Latin: "AR-15" is "ar15", and an
+    /// OCR'd "АК" is "ak" and "Üzi" is "uzi".
     public static func nameKey(_ text: String) -> String {
-        String(text.map { HUDText.lookalikes[$0] ?? $0 }).lowercased().filter { $0.isLetter || $0.isNumber }
+        String(text.map { HUDText.lookalikes[$0] ?? $0 }).folding(options: .diacriticInsensitive, locale: nil).lowercased()
+            .filter { $0.isLetter || $0.isNumber }
+    }
+    /// `nameKey` with the characters text recognition confuses in the prompt's font made one: o and 0, i, l and 1, s and
+    /// 5, b and 8, z and 2, g and 6, vv and w. "MPS" and "MP5" share a shape key; no two guns of a class do.
+    public static func shapeKey(_ text: String) -> String {
+        let same: [Character: Character] = ["o": "0", "i": "1", "l": "1", "s": "5", "b": "8", "z": "2", "g": "6"]
+        return String(nameKey(text).replacingOccurrences(of: "vv", with: "w").map { same[$0] ?? $0 })
     }
     public func heal(id: String) -> HealSpec? { heals.first { $0.id == id } }
     /// The consumable whose in-hand hint best matches one of these lines, when the match is clear.
@@ -155,7 +176,7 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
         guard !key.isEmpty else { return nil }
         return heals.first { heal in ([heal.name] + heal.aliases).contains { Self.letters($0) == key } }
     }
-    static func letters(_ text: String) -> String { String(text.lowercased().filter { $0.isLetter }) }
+    static func letters(_ text: String) -> String { String(text.folding(options: .diacriticInsensitive, locale: nil).lowercased().filter { $0.isLetter }) }
 
     public func profile(_ id: String) -> ItemProfile? {
         if id == Self.fistsID { var p = ItemProfile(id: id, name: "Fists", kind: .melee); p.verified = true; return p }
@@ -187,6 +208,7 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
             p.shieldCap = heal.shieldCap; p.useDuration = heal.useDuration
             p.keepValue = heal.keepValue ?? (heal.healthGain + heal.shieldGain) / 5
             p.overTime = heal.overTime ?? 0
+            p.maxStack = heal.maxStack; p.groundStack = heal.groundStack
             return p
         }
         return nil
@@ -278,16 +300,20 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
         heals: [
             // Keep values: small shields only work below 50 shield and bandages below 75 health, so they are cheap to spend;
             // hybrids are the only quick health besides bandages, and a med kit is the only full health.
-            HealSpec(id: "bandage", name: "Bandage", aliases: ["Bandages"], healthGain: 15, shieldGain: 0, healthCap: 75, shieldCap: 100, useDuration: 2.5, keepValue: 2),
-            HealSpec(id: "medkit", name: "Med Kit", aliases: ["Medkit", "Medical Kit"], healthGain: 100, shieldGain: 0, healthCap: 100, shieldCap: 100, useDuration: 6, keepValue: 25,
-                     hints: ["Heals to full health"]),
+            // Use times and stacks are the ZombsRoyale wiki's (October 2026); its 2 s for small shields and hybrids matches the
+            // progress ring on recordings. Ground stacks of 2 show an "x2" badge on the panel; a big shield has none.
+            HealSpec(id: "bandage", name: "Bandage", aliases: ["Bandages"], healthGain: 15, shieldGain: 0, healthCap: 75, shieldCap: 100, useDuration: 2.2, keepValue: 2,
+                     maxStack: 8, groundStack: 8),
+            HealSpec(id: "medkit", name: "Med Kit", aliases: ["Medkit", "Medical Kit"], healthGain: 100, shieldGain: 0, healthCap: 100, shieldCap: 100, useDuration: 5, keepValue: 25,
+                     hints: ["Heals to full health"], maxStack: 2, groundStack: 1),
             HealSpec(id: "small_shield", name: "Small Shield", aliases: ["Shield Potion", "Small Shield Potion", "Mini Shield"], healthGain: 0, shieldGain: 25, healthCap: 100, shieldCap: 50, useDuration: 2, keepValue: 2,
-                     hints: ["Charge shield by 25% up to 50%"]),
-            HealSpec(id: "large_shield", name: "Big Shield", aliases: ["Large Shield", "Big Shield Potion", "Large Shield Potion"], healthGain: 0, shieldGain: 50, healthCap: 100, shieldCap: 100, useDuration: 4, keepValue: 10,
-                     hints: ["Charge shields by 50% up to full"]),
-            // Drinking takes about 2 s (progress ring on recordings); health and shield then rise about 2.5 points a second.
+                     hints: ["Charge shield by 25% up to 50%"], maxStack: 4, groundStack: 2),
+            HealSpec(id: "large_shield", name: "Big Shield", aliases: ["Large Shield", "Big Shield Potion", "Large Shield Potion"], healthGain: 0, shieldGain: 50, healthCap: 100, shieldCap: 100, useDuration: 5, keepValue: 10,
+                     hints: ["Charge shields by 50% up to full"], maxStack: 2, groundStack: 1),
+            // Health and shield rise about 2.5 points a second after the drink. A second hybrid during those 10 s is wasted
+            // (the wiki: the effect does not stack).
             HealSpec(id: "hybrid_potion", name: "Hybrid Potion", aliases: [], healthGain: 25, shieldGain: 25, healthCap: 100, shieldCap: 100, useDuration: 2, keepValue: 12,
-                     overTime: 10, hints: ["Heals and shields 25% over time"]),
+                     overTime: 10, hints: ["Heals and shields 25% over time"], maxStack: 4, groundStack: 2),
         ],
         classWords: [
             "ar": .ar, "assault rifle": .ar, "rifle": .ar, "burst rifle": .ar,

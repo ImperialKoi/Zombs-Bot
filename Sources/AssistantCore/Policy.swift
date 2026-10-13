@@ -28,6 +28,10 @@ public struct CombatSettings: Codable, Equatable, Sendable {
     /// The cursor stays within this many view heights of your character (see `Targeting.cursor`); the aim keeps its
     /// direction, and clicks stay away from the window's edges.
     public var aimRadius = 0.35
+    /// Low on health: below this much health, or below twice this in health and shield together. A potion that helps
+    /// then comes first: one on the panel is picked up, even into a slot kept for a missing gun, and drinking goes
+    /// before other loot.
+    public var lowHealth = 50.0
     public init() {}
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -45,13 +49,14 @@ public struct CombatSettings: Codable, Equatable, Sendable {
         idleAfterFight = try c.decodeIfPresent(Double.self, forKey: .idleAfterFight) ?? d.idleAfterFight
         idleUserRespect = try c.decodeIfPresent(Double.self, forKey: .idleUserRespect) ?? d.idleUserRespect
         aimRadius = try c.decodeIfPresent(Double.self, forKey: .aimRadius) ?? d.aimRadius
+        lowHealth = try c.decodeIfPresent(Double.self, forKey: .lowHealth) ?? d.lowHealth
     }
     public var isValid: Bool {
         [closeCutoff, longCutoff, bandHysteresis, switchDwell, minPlayerConfidence, minAffiliationConfidence].allSatisfy(\.isFinite)
         && closeCutoff > 0 && longCutoff > closeCutoff + 2 * bandHysteresis && bandHysteresis >= 0 && switchDwell >= 0
         && (0...1).contains(minPlayerConfidence) && (0...1).contains(minAffiliationConfidence) && (0...5).contains(minHealSlots)
         && (0...0.3).contains(leadLatency) && (0...10).contains(leadPersistence) && (0.5...30).contains(idleQuiet) && (0...60).contains(idleAfterFight) && (0...600).contains(idleUserRespect)
-        && (0.1...0.45).contains(aimRadius)
+        && (0.1...0.45).contains(aimRadius) && (0...100).contains(lowHealth)
     }
 }
 
@@ -108,6 +113,11 @@ public enum Policy {
     }
     /// Air drops open after about 5 s at the chest, with a countdown under your character; other chests open at once.
     public static func chestNeedsHold(_ prompt: InteractionPrompt) -> Bool { ItemCatalog.letters(prompt.name).contains("airdrop") }
+    /// Health under `CombatSettings.lowHealth`, or health and shield together under twice that, read clearly.
+    public static func lowOnHealth(_ o: Observation, _ s: CombatSettings = .init()) -> Bool {
+        guard let hp = o.health, let shield = o.shield, o.hudConfidence >= 0.98 else { return false }
+        return hp < s.lowHealth || hp + shield < 2 * s.lowHealth
+    }
     public static func healingBenefit(_ profile: ItemProfile, in o: Observation) -> Double {
         guard let hp = o.health, let shield = o.shield, o.hudConfidence >= 0.98,
               (0...100).contains(hp), (0...100).contains(shield) else { return 0 }

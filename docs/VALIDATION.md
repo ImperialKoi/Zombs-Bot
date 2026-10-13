@@ -2,6 +2,102 @@
 
 Updated October 13, 2026 on this Apple silicon Mac (8 GB M1).
 
+## Potions first when low, and stack sizes, October 13
+
+You asked for potions to come first when you are low on health. You also gave the stack sizes: big shields stack to 2, small shields and hybrids to 4, which is two ground pickups. This was checked offline only.
+
+**Changes:**
+- **Low on health** means under 50 health, or under 100 health and shield together (`CombatSettings.lowHealth`).
+  - A potion on the panel that would help is picked up first, even into a slot kept for a missing gun.
+  - With a full inventory, a potion that cannot help now (shields when your shield is full) is swapped for it.
+  - Drinking then goes before any other loot, including during a heal's slot switch.
+  - When you are not low, loot still goes before heals, as before.
+- **Stack sizes** come from your list and the wiki: Big Shield 1 on the ground and 2 at most, Small Shield and Hybrid 2 and 4, Med Kit 1 and 2, Bandage 8 and 8. The slot's digits are rarely readable, so the assistant counts stacks itself:
+  - its own pickups, using the panel's "x2" badge if it was read while the item was on the panel, else one ground stack;
+  - stacks it sees arrive in an empty slot, including yours;
+  - each drink.
+
+  A key you press yourself makes the counts uncertain again. A potion joins a stack only when there is known room.
+- **Full inventory and a stack of uncertain size:** the potion is left alone. The game would swap out the selected item, perhaps a gun, if the potion does not fit. That the game swaps on a full stack is inferred, not observed.
+- **Hybrids one at a time.** A second hybrid waits until the first one's 10 s of healing is over, because the wiki says their effects do not stack. Other potions can be drunk meanwhile.
+- Previously a held potion was always picked up "to stack", even when its stack was full.
+- **Use times now follow the wiki:** Big Shield 5 s (was 4), Med Kit 5 s (was 6), Bandage 2.2 s (was 2.5). The wiki's 2 s for small shields and hybrids matches the progress ring measured on recordings.
+
+**Tests.** 141 Swift tests pass, 9 of them new:
+- the low-health threshold;
+- a potion taking a slot kept for a gun;
+- drinking before other loot only when low;
+- stacks filling to 2 and 4 and no further;
+- a stack of uncertain size left alone in a full inventory;
+- a stack seen arriving, and a key you press;
+- a badge read in an earlier frame;
+- a useless potion swapped for a useful one;
+- a second hybrid waiting out the first.
+
+One earlier test changed. A chest no longer opens during a heal's slot switch when you are low; at 60 health it still does.
+
+**Replays** (`ZombsPerceive --decide`, seeded icon library):
+- **Solo `78E1A3`.** At 59 health and no shield, a hybrid on the panel was taken with "Pick up Hybrid Potion: low on health". Stack counts showed on pickups ("Small Shield: 2 of 4 held", "Big Shield: 1 of 2 held").
+- **Solo `582E17`.** A Med Kit was first skipped, because the inventory was full and the held Med Kit's count was unknown. Counting stacks seen arriving fixed that: "Pick up Med Kit: 1 of 2 held".
+- The recordings do not respond to the assistant's keys, so its presses repeat and its selections time out there.
+
+**Unverified live:**
+- whether the game swaps the item in hand for a potion whose stack is full;
+- whether a hybrid during another's effect is really wasted;
+- the wiki's use times for the big shield, med kit and bandage.
+
+## Faster chests and pickups, October 13
+
+You reported waiting beside chests for them to open, and longer for gun pickups. This was checked offline only.
+
+**Text recognition is not the delay.** Vision's accurate mode was timed on the prompt panels of six recordings (104 distinct prompts):
+
+| Panel width | Read time (median) | Notes |
+|---|---|---|
+| 486 px (3840-wide window) | 37 ms | 43 ms while the detector replays a match alongside |
+| 374 px (2880-wide window) | 23 ms | |
+| 243 px (half size) | 26 ms | 60 of 60 chests and items parsed |
+
+- Every chest and item was parsed correctly at full size, and every gun was named.
+- Vision's fast mode takes 8 ms but misread 41 of 91 chests and items, so it is not used.
+
+**Root causes of the waits:**
+- **Taps cut short.** Every key tap was meant to last 35 ms, but the next frame's decision, about 18 ms later, released it. A game that samples keys once per frame can miss such a press below 60 fps. A missed chest press then waited 1.5 s plus a 3 s block before the next try; a missed pickup waited 1.2 s plus 3 s.
+- **Settling pauses.** After every chest (0.3 s), pickup (0.2 s) and missed slot switch (1 s), chests and pickups waited too.
+- **Heals first.** In a safe gap, heals started before loot and held it up for seconds: selecting the potion, checking it is in hand, drinking.
+- **Stacks never confirmed.** A consumable stack was confirmed only by a larger count, which Vision rarely reads, so stacks hit the 1.2 s + 3 s path.
+
+**Changes:**
+- Taps last 60 ms. Per-frame releases leave a tap alone until then; taking over, focus loss and Escape still release at once.
+- Chests and items for a free slot go before heals, settling pauses and a slot switch on its way. Swaps into a full inventory still wait for a heal under way and for settling, because they change the selected slot. A drink under way is never cut short.
+- The next item or chest on the panel is dealt with in the same frame a chest opens or an item is taken.
+- A pickup is done once the inventory gains the item or the item leaves the panel.
+- An item or chest still on the panel 0.6 s after a press is pressed again, three presses in all, then left alone for 3 s.
+- A swap presses interact as soon as the slot shows as selected, without the weapon's switch delay.
+- Gun names read by OCR also match through look-alike characters ("MPS" for MP5, "Uzl" or "Üzi" for Uzi, "AVVP" for AWP) and stray marks ("KSG Shotgun Z", read so in a recording). No two guns of a class share a look-alike spelling, which a test checks.
+- The status line names both guns: "Pick up Epic M4 in place of Rare AK", "Not picking up Rare AK: not better than Rare M4".
+
+**Replays** (`ZombsPerceive --decide`, before and after, same frames; an episode is a run of frames whose panel names one chest or item):
+
+| Match | Episodes | Acted on, before | Acted on, after |
+|---|---|---|---|
+| Solo `78E1A3` | 92 | 22 | 45 |
+| Solo `582E17` | 57 | 19 | 33 |
+
+- The Air Drop Chest hold started at once instead of after 0.6 s of settling.
+- Most remaining episodes are deliberate skips: a gun not better than yours, launchers, a fight, a full inventory.
+- Others are replay artifacts: the recording never shows the slot switches the assistant asks for.
+- **Prompt masks.** Across 607 recorded panels, the same gun at another rarity overlapped at most 0.72, and two different guns at most 0.77, below the 0.8 a match needs. A read never stands in for a different text.
+
+132 Swift tests pass.
+
+The synthetic replay fixtures now give 4 proposed actions, 1 fire and 2 pickup presses, with 0 guard rejections. The Med Kit still shows 2.1 s after the first press, so it is pressed again.
+
+**Unverified live:**
+- whether the game really missed the short taps;
+- whether 0.6 s is long enough for the game to answer a press under lag (a second press then acts on what is next on the panel);
+- how pickups while a heal waits feel in play.
+
 ## Named guns, October 13
 
 The catalog now knows 37 guns by name, with their ranking ([weapons reference](WEAPONS.md)) and wiki stats. This was checked offline only.
