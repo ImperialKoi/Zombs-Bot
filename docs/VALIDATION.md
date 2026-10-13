@@ -1,6 +1,23 @@
 # Validation status
 
-Updated October 9, 2026 on this Apple silicon Mac (8 GB M1).
+Updated October 13, 2026 on this Apple silicon Mac (8 GB M1).
+
+## Named guns, October 13
+
+The catalog now knows 37 guns by name, with their ranking ([weapons reference](WEAPONS.md)) and wiki stats. This was checked offline only.
+
+- **Tests.** 129 Swift tests pass. The new ones cover:
+  - matching names, including Cyrillic look-alikes and one misread letter in long names;
+  - per-gun stats and power;
+  - pickups that keep the stronger gun and skip near-equals;
+  - the better gun of a class winning its range band;
+  - the Semi-Auto Sniper's four shots a second, accepted by the input guard;
+  - an icon tied between two rifles staying unnamed.
+- **Solo `78E1A3` replayed** before and after (`ZombsPerceive --decide`, seeded icon library, 1,377 frames).
+  - Of 2,033 inventory gun readings, 2,029 had the gun's name.
+  - The only change in what the assistant did: it took an MG36 over its Mythic XM8, which it had counted as equal before.
+  - Fire, reload, heal, chest and other pickup actions were identical; status lines now name the gun ("Epic M4" instead of "Epic AR").
+  - A first version put pistols in the close-range slot and picked up a Common Glock and an Uncommon P2000 just to fill it. Pistols stay mid-range fallbacks.
 
 ## Beta checks, October 9
 

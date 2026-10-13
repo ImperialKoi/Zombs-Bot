@@ -594,8 +594,8 @@ struct AssistantCoreTests {
         expectEqual(gun("sniper:epic:semi_auto_sniper").shotInterval,0.25);expectEqual(gun("sniper:epic").shotInterval,1.1)
         expectTrue(gun("sniper:legendary:vss").automatic);expectEqual(gun("sniper:legendary:vss").ammo,.small)
         expectEqual(gun("smg:rare:tommy_gun").ammo,.medium)
-        expectEqual(gun("pistol:epic:silenced_pistol").role,.close);expectTrue(gun("pistol:epic:silenced_pistol").automatic)
-        expectEqual(gun("pistol:epic:deagle").role,.long);expectFalse(gun("pistol:epic:deagle").automatic)
+        expectTrue(gun("pistol:epic:silenced_pistol").automatic);expectFalse(gun("pistol:epic:deagle").automatic)
+        expectEqual(gun("pistol:epic:silenced_pistol").role,.medium) // Pistols stay the fallback they were.
         expectEqual(gun("ar:rare:m4").name,"Rare M4");expectEqual(gun("ar:rare").name,"Rare AR")
         // What the wiki only describes in words stays the class estimate: range, bullet speed and zoom.
         expectEqual(gun("sniper:rare:awp").zoom,1.2);expectEqual(gun("ar:rare:m4").maxRange,gun("ar:rare").maxRange)

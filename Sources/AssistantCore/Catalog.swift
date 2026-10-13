@@ -262,12 +262,13 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
             // The VSS and the Hunting Rifle keep firing while the button is held.
             WeaponModel(id: "vss", name: "VSS", weaponClass: .sniper, rank: 32, best: .legendary, automatic: true, shotInterval: 0.125, reloadDuration: 1.2, ammo: .small, minHitProbability: 0.01),
             WeaponModel(id: "hunting_rifle", name: "Hunting Rifle", weaponClass: .sniper, rank: 36, best: .epic, automatic: true, shotInterval: 0.25, reloadDuration: 0.9, ammo: .large, minHitProbability: 0.03),
-            // Automatic pistols fill the close-range slot; the Deagle hits like a small sniper.
-            WeaponModel(id: "silenced_pistol", name: "Silenced Pistol", weaponClass: .pistol, rank: 24, best: .epic, role: .close, automatic: true, shotInterval: 0.1, reloadDuration: 1, ammo: .small, minHitProbability: 0.01),
-            WeaponModel(id: "dual_berettas", name: "Dual Berettas", aliases: ["Dual Pistols"], weaponClass: .pistol, rank: 25, best: .rare, role: .close, automatic: true, shotInterval: 0.067, reloadDuration: 1, ammo: .small, minHitProbability: 0.01),
-            WeaponModel(id: "deagle", name: "Deagle", aliases: ["Desert Eagle"], weaponClass: .pistol, rank: 31, best: .epic, role: .long, automatic: false, shotInterval: 0.5, reloadDuration: 1, ammo: .large),
-            WeaponModel(id: "glock", name: "Glock", weaponClass: .pistol, rank: 38, best: .uncommon, role: .close, automatic: true, shotInterval: 0.083, reloadDuration: 1, ammo: .small, minHitProbability: 0.01),
-            WeaponModel(id: "p2000", name: "P2000", aliases: ["P2K"], weaponClass: .pistol, rank: 39, best: .uncommon, role: .close, automatic: true, shotInterval: 0.09, reloadDuration: 1, ammo: .small, minHitProbability: 0.01),
+            // Pistols keep their class role, a fallback: in the close or long slot one would only take up space, as the range
+            // bands prefer an assault rifle to it.
+            WeaponModel(id: "silenced_pistol", name: "Silenced Pistol", weaponClass: .pistol, rank: 24, best: .epic, automatic: true, shotInterval: 0.1, reloadDuration: 1, ammo: .small, minHitProbability: 0.01),
+            WeaponModel(id: "dual_berettas", name: "Dual Berettas", aliases: ["Dual Pistols"], weaponClass: .pistol, rank: 25, best: .rare, automatic: true, shotInterval: 0.067, reloadDuration: 1, ammo: .small, minHitProbability: 0.01),
+            WeaponModel(id: "deagle", name: "Deagle", aliases: ["Desert Eagle"], weaponClass: .pistol, rank: 31, best: .epic, automatic: false, shotInterval: 0.5, reloadDuration: 1, ammo: .large),
+            WeaponModel(id: "glock", name: "Glock", weaponClass: .pistol, rank: 38, best: .uncommon, automatic: true, shotInterval: 0.083, reloadDuration: 1, ammo: .small, minHitProbability: 0.01),
+            WeaponModel(id: "p2000", name: "P2000", aliases: ["P2K"], weaponClass: .pistol, rank: 39, best: .uncommon, automatic: true, shotInterval: 0.09, reloadDuration: 1, ammo: .small, minHitProbability: 0.01),
             WeaponModel(id: "minigun", name: "Minigun", weaponClass: .minigun, rank: 28, best: .legendary, automatic: true, shotInterval: 0.045, reloadDuration: 3, ammo: .small),
             // Launchers and bows stay manual; named here for the dashboard.
             WeaponModel(id: "rpg", name: "RPG", weaponClass: .launcher, rank: 30, best: .legendary, ammo: .large),

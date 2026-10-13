@@ -248,7 +248,7 @@ The catalog (`Sources/AssistantCore/Catalog.swift`) lists the 37 guns a prompt c
   - The Semi-Auto Sniper clicks four times a second.
   - The VSS, Hunting Rifle and the automatic pistols are held down.
   - The Dragunov reloads after every shot.
-- Pistols other than the Deagle fill the close-range slot; the Deagle fills the long one.
+- Pistols keep the assistant's fallback role at mid range. In the close or long slot one would only take up space, because the range bands prefer an assault rifle to a pistol.
 - Range, zoom and bullet speed stay class estimates, because the wiki only describes them in words.
 - The Stimpack (+50% movement speed and fire rate for 10 s) is not in the catalog yet.
 - The wiki's use times for the Big Shield (5 s), Med Kit (5 s) and Bandage (2.2 s) differ from the catalog's estimates (4 s, 6 s, 2.5 s). Measure them before changing anything.
