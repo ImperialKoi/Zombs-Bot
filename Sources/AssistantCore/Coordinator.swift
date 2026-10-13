@@ -124,9 +124,16 @@ public final class Coordinator {
         }
         return table[weaponClass]
     }
-    /// Worth of a weapon in its own role: class preference first, then rarity.
+    /// Worth of a weapon in its own role: its power on the gun ranking's scale, or for profiles without one, class
+    /// preference first, then rarity.
     static func value(_ p: ItemProfile) -> Double {
-        (p.role.flatMap { preference(p, band: $0) } ?? 0) + Double(p.tier) * 2
+        p.power ?? ((p.role.flatMap { preference(p, band: $0) } ?? 0) + Double(p.tier) * 2)
+    }
+    /// A gun replaces one of its role only when it is worth this much more: two rank places, or any rarity step.
+    static let upgradeMargin = 1.5
+    /// Score of a weapon for a distance band: class preference, then rarity and how good the gun is for its class.
+    static func bandScore(_ p: ItemProfile, band: WeaponRole) -> Double? {
+        preference(p, band: band).map { $0 + Double(p.tier) * 2 + p.edge }
     }
     /// The band for a target distance; the current band extends by the hysteresis margin.
     func band(for distance: Double) -> WeaponRole {
@@ -304,7 +311,7 @@ public final class Coordinator {
 
         if let r = recovery, r.consumed != nil {
             guard let slot = o.slot(r.slot), slot.isKnownEmpty else { recovery = nil; return idle(o.timestamp, "Recovery slot is no longer empty") }
-            if features.loot, let prompt = Policy.pickupPrompt(o), prompt.itemID == r.weapon {
+            if features.loot, let prompt = Policy.pickupPrompt(o), let id = prompt.itemID, Self.sameItem(id, r.weapon) {
                 return pickup(prompt, replacing: nil, in: o, now: t)
             }
         }
@@ -334,8 +341,8 @@ public final class Coordinator {
               t - lastTargetSeen >= settings.idleAfterFight else { return nil }
         let best = o.inventory.compactMap { slot -> (slot: InventorySlot, item: ItemProfile, score: Double)? in
             guard let p = profile(slot), p.kind == .weapon, slot.hasAnyAmmo, noAmmoUntil[slot.index] == nil,
-                  let preference = Self.preference(p, band: .long) else { return nil }
-            return (slot, p, preference + Double(p.tier) * 2 + (slot.index == o.selectedSlot ? 4 : 0))
+                  let score = Self.bandScore(p, band: .long) else { return nil }
+            return (slot, p, score + (slot.index == o.selectedSlot ? 4 : 0))
         }.max { $0.score < $1.score }
         guard let best, best.slot.index != o.selectedSlot, t - lastIdleRequest >= 5 else { return nil }
         lastIdleRequest = t
@@ -433,6 +440,12 @@ public final class Coordinator {
         return "Player in view; not engaged"
     }
 
+    /// The same item: equal IDs, or a gun of the same class and rarity when one of the two was read without its name.
+    static func sameItem(_ a: String, _ b: String) -> Bool {
+        if a == b { return true }
+        guard let x = ItemCatalog.parseWeaponID(a), let y = ItemCatalog.parseWeaponID(b), x == y else { return false }
+        return ItemCatalog.modelID(in: a) == nil || ItemCatalog.modelID(in: b) == nil
+    }
     /// A slot from 2 to 6 now holds a different item or a larger stack.
     static func inventoryGained(from before: [InventorySlot], to after: [InventorySlot]) -> Bool {
         after.contains { slot in
@@ -464,8 +477,7 @@ public final class Coordinator {
             return (slot, p)
         }
         var weapons = armed.compactMap { slot, p -> (InventorySlot, ItemProfile, Double)? in
-            guard distance <= p.maxRange, var score = Self.preference(p, band: band) else { return nil }
-            score += Double(p.tier) * 2
+            guard distance <= p.maxRange, var score = Self.bandScore(p, band: band) else { return nil }
             if slot.index == o.selectedSlot {
                 score += 4 // Avoid trading a weapon for a near-equal one.
                 if slot.ammo == 0 { score -= 30 } // Switching to a loaded weapon beats reloading mid-fight.
@@ -552,7 +564,7 @@ public final class Coordinator {
             guard let role = incoming.role else { return skip("launchers and special weapons stay manual") }
             let sameRole = weapons.filter { profile($0)?.role == role }
             if let worst = sameRole.min(by: { Self.value(profile($0)!) < Self.value(profile($1)!) }) {
-                guard Self.value(incoming) > Self.value(profile(worst)!) + 0.5 else { return skip("not better than \(profile(worst)!.name)") }
+                guard Self.value(incoming) > Self.value(profile(worst)!) + Self.upgradeMargin else { return skip("not better than \(profile(worst)!.name)") }
                 return pickup(prompt, replacing: empty.isEmpty ? worst : nil, in: o, now: t)
             }
             if !empty.isEmpty { return pickup(prompt, replacing: nil, in: o, now: t) }

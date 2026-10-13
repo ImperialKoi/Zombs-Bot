@@ -569,13 +569,114 @@ struct AssistantCoreTests {
         expectEqual(ItemCatalog.parseWeaponID(ItemCatalog.weaponID(.sniper,.mythic))?.1,Rarity.mythic)
     }
 
+    // MARK: Named guns
+    @Test func testCatalogNamesGunsFromPromptsAndIcons() {
+        let catalog=ItemCatalog.standard
+        expectEqual(catalog.weaponID(.ar,.rare,name:"M4"),"ar:rare:m4")
+        expectEqual(catalog.weaponID(.ar,.epic,name:"АК"),"ar:epic:ak")                              // Cyrillic look-alikes, as OCR read them once.
+        expectEqual(catalog.weaponID(.sniper,.rare,name:"Bolt Mk. Il Sniper"),"sniper:rare:bolt_mk2")  // One misread letter in a long name.
+        expectEqual(catalog.weaponID(.ar,.rare,name:"M5"),"ar:rare")                                 // Short names must match exactly.
+        expectEqual(catalog.weaponID(.shotgun,.rare,name:"M4"),"shotgun:rare")                       // Another class's gun is not trusted.
+        expectEqual(catalog.weaponID(.ar,.rare,name:""),"ar:rare")
+        expectEqual(ItemCatalog.parseWeaponID("ar:rare:m4")?.1,Rarity.rare)
+        expectEqual(ItemCatalog.modelID(in:"ar:rare:m4"),"m4");expectEqual(ItemCatalog.modelID(in:"ar:rare"),nil)
+        expectTrue(catalog.profile("ar:rare:nosuchgun")==nil);expectTrue(catalog.profile("shotgun:rare:m4")==nil)
+        // A gun swapped out for a potion is recognized again even if one of the two readings missed its name.
+        expectTrue(Coordinator.sameItem("ar:rare:m4","ar:rare"));expectFalse(Coordinator.sameItem("ar:rare:m4","ar:rare:ak"))
+        expectFalse(Coordinator.sameItem("ar:rare","ar:epic"));expectTrue(Coordinator.sameItem("med","med"))
+        let ids=Set(catalog.profiles.map(\.id))
+        expectTrue(catalog.models.allSatisfy { m in Rarity.allCases.allSatisfy { ids.contains(ItemCatalog.weaponID(m.weaponClass,$0,model:m.id)) } })
+        expectTrue(catalog.profiles.allSatisfy(\.isValid))
+    }
+    @Test func testNamedGunsUseTheWikiStats() {
+        let catalog=ItemCatalog.standard
+        func gun(_ id:String)->ItemProfile { catalog.profile(id)! }
+        expectEqual(gun("sniper:epic:semi_auto_sniper").shotInterval,0.25);expectEqual(gun("sniper:epic").shotInterval,1.1)
+        expectTrue(gun("sniper:legendary:vss").automatic);expectEqual(gun("sniper:legendary:vss").ammo,.small)
+        expectEqual(gun("smg:rare:tommy_gun").ammo,.medium)
+        expectEqual(gun("pistol:epic:silenced_pistol").role,.close);expectTrue(gun("pistol:epic:silenced_pistol").automatic)
+        expectEqual(gun("pistol:epic:deagle").role,.long);expectFalse(gun("pistol:epic:deagle").automatic)
+        expectEqual(gun("ar:rare:m4").name,"Rare M4");expectEqual(gun("ar:rare").name,"Rare AR")
+        // What the wiki only describes in words stays the class estimate: range, bullet speed and zoom.
+        expectEqual(gun("sniper:rare:awp").zoom,1.2);expectEqual(gun("ar:rare:m4").maxRange,gun("ar:rare").maxRange)
+        expectEqual(gun("launcher:rare:rpg").role,nil) // Launchers stay manual.
+    }
+    @Test func testPowerFollowsTheRankingAndRarity() {
+        let catalog=ItemCatalog.standard
+        func power(_ id:String)->Double { catalog.profile(id)!.power! }
+        // At the best rarity each gun normally drops at, power follows the ranking of docs/WEAPONS.md.
+        let ranked=catalog.models.sorted { $0.rank < $1.rank }.map { power(ItemCatalog.weaponID($0.weaponClass,$0.best,model:$0.id)) }
+        expectEqual(ranked,ranked.sorted(by:>))
+        expectEqual(power("ar:epic:m4")-power("ar:rare:m4"),3)          // One rarity step.
+        expectTrue(power("ar:uncommon:m4")>power("ar:legendary:ak"))     // About the same kill time; the M4 is steadier.
+        expectEqual(power("ar:legendary"),85)                              // An unnamed rifle counts as an average one…
+        expectEqual(catalog.profile("ar:rare")!.edge,0)                    // …with no edge over its class.
+        expectTrue(catalog.profile("ar:rare:m4")!.edge>0 && catalog.profile("ar:rare:ak")!.edge<0)
+    }
+    /// Catalog guns in slots 2 to 4 and two potions, with a potion selected.
+    func stocked(_ close:String,_ medium:String,_ long:String)->(Coordinator,Observation) {
+        let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+        var o=observation();o.selectedSlot=5
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:close,ammo:5,reserveAmmo:10),.init(3,itemID:medium,ammo:30,reserveAmmo:90),
+                     .init(4,itemID:long,ammo:5,reserveAmmo:10),.init(5,itemID:"hybrid_potion",count:2),.init(6,itemID:"small_shield",count:2)]
+        return (c,o)
+    }
+    func gunPrompt(_ name:String,_ subtitle:String)->InteractionPrompt? { HUDText.prompt(lines:[name,subtitle],confidence:1,catalog:.standard) }
+    @Test func testPickupsKeepTheStrongerNamedGun() {
+        // A Legendary UMP beats an Epic Pump Shotgun: the shotgun's slot is selected for the swap.
+        var (c,o)=stocked("shotgun:epic:pump_shotgun","ar:rare:m4","sniper:rare:bolt_mk2");o.prompt=gunPrompt("UMP","Legendary SMG")
+        expectTrue(step(c,o).intents.contains(.selectSlot(2)))
+        // At the same rarity an M4 replaces an AK, never the other way round.
+        (c,o)=stocked("smg:rare:mp5","ar:rare:ak","sniper:rare:bolt_mk2");o.prompt=gunPrompt("M4","Rare AR")
+        expectTrue(step(c,o).intents.contains(.selectSlot(3)))
+        (c,o)=stocked("smg:rare:mp5","ar:rare:m4","sniper:rare:bolt_mk2");o.prompt=gunPrompt("AK","Rare AR")
+        var d=step(c,o);expectFalse(d.intents.contains(.selectSlot(3)));expectFalse(d.intents.contains(.pickup("AK")))
+        expectEqual(d.reason,"Not picking up AK: not better than Rare M4")
+        // Near equals are not worth a swap: a Legendary Uzi for a Legendary MP5.
+        (c,o)=stocked("smg:legendary:mp5","ar:rare:m4","sniper:rare:bolt_mk2");o.prompt=gunPrompt("Uzi","Legendary SMG")
+        expectFalse(step(c,o).intents.contains(.selectSlot(2)))
+        // The Semi-Auto Sniper beats a Bolt Mk. II a rarity above it.
+        (c,o)=stocked("smg:rare:mp5","ar:rare:m4","sniper:legendary:bolt_mk2");o.prompt=gunPrompt("Semi-Auto Sniper","Epic Sniper")
+        expectTrue(step(c,o).intents.contains(.selectSlot(4)))
+        // A gun whose name was never read counts as an average one of its class.
+        (c,o)=stocked("smg:rare:mp5","ar:legendary","sniper:rare:bolt_mk2");o.prompt=gunPrompt("M4","Legendary AR")
+        expectTrue(step(c,o).intents.contains(.selectSlot(3)))
+        (c,o)=stocked("smg:rare:mp5","ar:legendary","sniper:rare:bolt_mk2");o.prompt=gunPrompt("AK","Legendary AR")
+        d=step(c,o);expectFalse(d.intents.contains(.selectSlot(3)))
+    }
+    @Test func testTheBetterGunOfAClassIsChosenForTheBand() throws {
+        // Two SMGs up close: the UMP, though the MP5 is in hand.
+        let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+        var o=armed(0.08)
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"smg:legendary:mp5",ammo:30,reserveAmmo:90),.init(3,itemID:"smg:legendary:ump",ammo:35,reserveAmmo:90),
+                     .init(4,count:0),.init(5,count:0),.init(6,count:0)]
+        expectTrue(step(c,o).intents.contains(.selectSlot(3)))
+        // In a quiet spell the Semi-Auto Sniper is carried rather than a Bolt Mk. II a rarity above it.
+        let q=Coordinator(catalog:.standard);var p=observation();p.selectedSlot=2
+        p.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"smg:rare:mp5",ammo:30,reserveAmmo:90),.init(3,itemID:"sniper:legendary:bolt_mk2",ammo:5,reserveAmmo:10),
+                     .init(4,itemID:"sniper:epic:semi_auto_sniper",ammo:5,reserveAmmo:10),.init(5,count:0),.init(6,count:0)]
+        _=step(q,p);p.timestamp=2.6
+        let d=step(q,p);expectTrue(d.intents.contains(.selectSlot(4)));expectEqual(d.reason,"Carry Epic Semi-Auto Sniper while nothing is happening")
+    }
+    @Test func testSemiAutoSniperFiresFourTimesASecond() throws {
+        let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+        var o=armed(0.42)
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"sniper:epic:semi_auto_sniper",ammo:5,reserveAmmo:20),.init(3,count:0),.init(4,count:0),.init(5,count:0),.init(6,count:0)]
+        let first=step(c,o);expectTrue(first.intents.contains(.fire))
+        // The input guard checks the shot against the same named profile.
+        let aim=try #require(first.intents.compactMap { if case .aim(let p)=$0 { return p }; return nil }.first)
+        expectTrue(ActionGuard(profiles:c.profiles).permits(.fire,observation:o,now:0,aim:aim))
+        o.timestamp=0.1;expectFalse(step(c,o).intents.contains(.fire))
+        o.timestamp=0.3;expectTrue(step(c,o).intents.contains(.fire)) // A bolt-action waits a second.
+    }
+
     // MARK: Prompt text
     @Test func testPromptParserIdentifiesItemsAndRejectsEverythingElse() throws {
         let catalog=ItemCatalog.standard
         let gun=try #require(HUDText.prompt(lines:["M4","Rare AR","E"],confidence:1,catalog:catalog,key:"E"))
-        expectEqual(gun.kind,.weapon);expectEqual(gun.itemID,"ar:rare");expectEqual(gun.name,"M4")
+        expectEqual(gun.kind,.weapon);expectEqual(gun.itemID,"ar:rare:m4");expectEqual(gun.name,"M4")
         let pump=try #require(HUDText.prompt(lines:["Pump Shotgun","Legendary Shotgun"],confidence:1,catalog:catalog))
-        expectEqual(pump.itemID,"shotgun:legendary")
+        expectEqual(pump.itemID,"shotgun:legendary:pump_shotgun")
         let potion=try #require(HUDText.prompt(lines:["Hybrid Potion","x2","Healing","E"],confidence:1,catalog:catalog,key:"E"))
         expectEqual(potion.itemID,"hybrid_potion");expectEqual(potion.count,2)
         let appended=try #require(HUDText.prompt(lines:["Bandage x5","Healing"],confidence:1,catalog:catalog))
@@ -594,10 +695,10 @@ struct AssistantCoreTests {
         let unknownHeal=try #require(HUDText.prompt(lines:["Mystery Brew","Healing"],confidence:1,catalog:catalog))
         expectEqual(unknownHeal.kind,.healing);expectFalse(unknownHeal.isItem)
         // Recorded misreads: Cyrillic look-alikes and stray symbols.
-        expectEqual(HUDText.prompt(lines:["MP5","E","Еріс SMG"],confidence:1,catalog:catalog,key:"E")?.itemID,"smg:epic")
-        expectEqual(HUDText.prompt(lines:["MP5","Epіc SMG"],confidence:1,catalog:catalog)?.itemID,"smg:epic")
-        expectEqual(HUDText.prompt(lines:["SCAR","Uncommon AR •"],confidence:1,catalog:catalog)?.itemID,"ar:uncommon")
-        expectEqual(HUDText.prompt(lines:["Pump Shotgun","&Common Shotgun"],confidence:1,catalog:catalog)?.itemID,"shotgun:common")
+        expectEqual(HUDText.prompt(lines:["MP5","E","Еріс SMG"],confidence:1,catalog:catalog,key:"E")?.itemID,"smg:epic:mp5")
+        expectEqual(HUDText.prompt(lines:["MP5","Epіc SMG"],confidence:1,catalog:catalog)?.itemID,"smg:epic:mp5")
+        expectEqual(HUDText.prompt(lines:["SCAR","Uncommon AR •"],confidence:1,catalog:catalog)?.itemID,"ar:uncommon:scar")
+        expectEqual(HUDText.prompt(lines:["Pump Shotgun","&Common Shotgun"],confidence:1,catalog:catalog)?.itemID,"shotgun:common:pump_shotgun")
         expectEqual(HUDText.prompt(lines:["Small Shield","x2","Potion"],confidence:1,catalog:catalog)?.itemID,"small_shield")
         expectEqual(HUDText.prompt(lines:["Big Shield","Potion"],confidence:1,catalog:catalog)?.itemID,"large_shield")
         expectEqual(HUDText.prompt(lines:["Frag Grenade","Common Grenade"],confidence:1,catalog:catalog)?.kind,.throwable)
@@ -879,11 +980,11 @@ struct AssistantCoreTests {
         func read(_ lines:[String])->InteractionPrompt? { HUDText.prompt(lines:lines,confidence:1,catalog:catalog,key:"E") }
         let badge=try #require(read(["XZ","Small Shield","E","Potion"]));expectEqual(badge.itemID,"small_shield");expectEqual(badge.count,2)
         expectEqual(read(["XI5","Bandage","Healing"])?.count,15)
-        expectEqual(read(["SCAR","Eo","Rare AR"])?.itemID,"ar:rare")
-        expectEqual(read(["MP5","E","Uncommon SMC"])?.itemID,"smg:uncommon")
-        expectEqual(read(["SCAR","E","Rare ARO"])?.itemID,"ar:rare")
-        expectEqual(read(["AWP","egendary Sniper"])?.itemID,"sniper:legendary")
-        expectEqual(read(["Glock","Rafe Pistol"])?.itemID,"pistol:rare")
+        expectEqual(read(["SCAR","Eo","Rare AR"])?.itemID,"ar:rare:scar")
+        expectEqual(read(["MP5","E","Uncommon SMC"])?.itemID,"smg:uncommon:mp5")
+        expectEqual(read(["SCAR","E","Rare ARO"])?.itemID,"ar:rare:scar")
+        expectEqual(read(["AWP","egendary Sniper"])?.itemID,"sniper:legendary:awp")
+        expectEqual(read(["Glock","Rafe Pistol"])?.itemID,"pistol:rare:glock")
         expectEqual(read(["Gold Chest","E","Interast"])?.kind,.chest)
         expectEqual(read(["Hoverboard","5","Exit Vehicle"])?.kind,.other)
         expectEqual(read(["Door","E","Oper"])?.kind,.other)

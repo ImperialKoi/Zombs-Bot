@@ -40,6 +40,12 @@ public struct ItemProfile: Codable, Equatable, Sendable {
     /// How much more of the map the view shows while this weapon is in hand: snipers zoom out about 1.2×. Screen
     /// distances times this are in the default view's widths, the unit of `maxRange` and the distance bands.
     public var zoom: Double = 1
+    /// A gun's worth on the gun ranking's scale (`WeaponModel.power`): about 100 for the best gun at its best rarity,
+    /// 1 point less per rank place, 3 points per rarity step. Pickups keep the stronger gun. nil for profiles without it.
+    public var power: Double?
+    /// How many of those points the gun is worth over an average gun of its class at the same rarity; the weapon
+    /// chosen for a distance band adds it to the class's preference there.
+    public var edge: Double = 0
     public init(id: String, name: String, kind: ItemKind, role: WeaponRole? = nil) {
         self.id = id; self.name = name; self.kind = kind; self.role = role
     }
@@ -69,11 +75,14 @@ public struct ItemProfile: Codable, Equatable, Sendable {
         minHitProbability = try c.decodeIfPresent(Double.self, forKey: .minHitProbability)
         ammo = try c.decodeIfPresent(AmmoFamily.self, forKey: .ammo)
         zoom = try c.decodeIfPresent(Double.self, forKey: .zoom) ?? 1
+        power = try c.decodeIfPresent(Double.self, forKey: .power)
+        edge = try c.decodeIfPresent(Double.self, forKey: .edge) ?? 0
     }
     public var isValid: Bool {
         !id.isEmpty && [shotInterval,reloadDuration,switchDelay,projectileSpeed,minRange,maxRange,healthGain,shieldGain,healthCap,shieldCap,useDuration,keepValue,overTime].allSatisfy { $0.isFinite && $0 >= 0 }
         && shotInterval >= 0.03 && switchDelay >= 0.05 && maxRange >= minRange && healthCap <= 100 && shieldCap <= 100
         && (minHitProbability.map { $0.isFinite && $0 > 0 && $0 <= 1 } ?? true) && zoom.isFinite && (0.5...3).contains(zoom)
+        && (power?.isFinite ?? true) && edge.isFinite
     }
 }
 

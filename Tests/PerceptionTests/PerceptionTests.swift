@@ -85,7 +85,7 @@ struct PerceptionTests {
     }
     @Test func testTextRecognitionReadsPromptsAndAmmunition() throws {
         let gun = try #require(try promptOf("a-001235"))
-        #expect(gun.kind == .weapon && gun.itemID == "ar:rare" && gun.name == "M4")
+        #expect(gun.kind == .weapon && gun.itemID == "ar:rare:m4" && gun.name == "M4")
         let potion = try #require(try promptOf("a-006323"))
         #expect(potion.itemID == "hybrid_potion")
         let vehicle = try #require(try promptOf("b-004539"))
@@ -195,7 +195,7 @@ struct PerceptionTests {
                            selectedConfidence: selected == nil ? 0 : 1, promptVisible: false, promptRect: nil, promptFingerprint: [], readoutFingerprint: [],
                            reserveFingerprints: [], rosterRows: 0)
     }
-    let m4 = InteractionPrompt(name: "M4", subtitle: "Rare AR", kind: .weapon, itemID: "ar:rare", weaponClass: .ar, rarity: .rare)
+    let m4 = InteractionPrompt(name: "M4", subtitle: "Rare AR", kind: .weapon, itemID: "ar:rare:m4", weaponClass: .ar, rarity: .rare)
 
     @Test func testPickupTeachesTheIconAndLaterMatchesAnyRarity() {
         let library = IconLibrary(entries: [])
@@ -203,12 +203,12 @@ struct PerceptionTests {
         _ = tracker.update(snapshot([:]), prompt: nil, readout: nil, counts: [:], reserves: [:], time: 0)
         _ = tracker.update(snapshot([:]), prompt: m4, readout: nil, counts: [:], reserves: [:], time: 0.2)
         let picked = tracker.update(snapshot([2: (icon(1), .rare)]), prompt: nil, readout: nil, counts: [2: 120], reserves: [:], time: 0.4)
-        #expect(picked[1].itemID == "ar:rare" && picked[1].totalAmmo == 120 && picked[1].label == "M4")
+        #expect(picked[1].itemID == "ar:rare:m4" && picked[1].totalAmmo == 120 && picked[1].label == "M4")
         _ = tracker.update(snapshot([2: (icon(1), .rare)]), prompt: nil, readout: nil, counts: [:], reserves: [:], time: 0.9)
         #expect(library.entries.count == 1)
         let later = InventoryTracker(library: library)
         let seen = later.update(snapshot([3: (icon(1), .epic)]), prompt: nil, readout: nil, counts: [:], reserves: [:], time: 0)
-        #expect(seen[2].itemID == "ar:epic")
+        #expect(seen[2].itemID == "ar:epic:m4") // The icon names the gun at any rarity.
     }
 
     @Test func testSimultaneousChangesAreNotLabeledByThePrompt() {
@@ -227,7 +227,7 @@ struct PerceptionTests {
         _ = tracker.update(snapshot([:]), prompt: m4, readout: nil, counts: [:], reserves: [:], time: 0)
         _ = tracker.update(snapshot([2: (icon(1), .rare)]), prompt: nil, readout: nil, counts: [:], reserves: [:], time: 0.2)
         let moved = tracker.update(snapshot([5: (icon(1), .rare)]), prompt: nil, readout: nil, counts: [:], reserves: [:], time: 2)
-        #expect(moved[4].itemID == "ar:rare" && moved[1].isKnownEmpty)
+        #expect(moved[4].itemID == "ar:rare:m4" && moved[1].isKnownEmpty)
     }
 
     @Test func testUnknownSelectedWeaponIsPlacedByItsAmmunition() {
@@ -337,5 +337,21 @@ struct PerceptionTests {
         #expect(!library.learn(ItemIdentity(kind: .weapon, weaponClass: .shotgun, name: "Pump"), icon(1)))
         #expect(library.match(icon(1))?.identity.weaponClass == .ar)
         #expect(library.match(icon(7)) == nil)
+    }
+
+    @Test func testIconLibraryLeavesOutAGunNameItCannotTellApart() {
+        let m4 = ItemIdentity(kind: .weapon, weaponClass: .ar, name: "M4"), ak = ItemIdentity(kind: .weapon, weaponClass: .ar, name: "AK")
+        // Two rifles whose icons match equally well: the class is certain, the gun is not, so it counts as an average rifle.
+        let tied = IconLibrary(entries: [IconEntry(identity: m4, fingerprint: icon(1), samples: 1), IconEntry(identity: ak, fingerprint: icon(1), samples: 1)])
+        let match = tied.match(icon(1))
+        #expect(match?.identity.weaponClass == .ar && match?.identity.name == "")
+        #expect(match?.identity.itemID(rarity: .rare) == "ar:rare")
+        // The same gun learned under an OCR look-alike spelling is still one gun.
+        let cyrillic = ItemIdentity(kind: .weapon, weaponClass: .ar, name: "АК")
+        let spelled = IconLibrary(entries: [IconEntry(identity: ak, fingerprint: icon(1), samples: 1), IconEntry(identity: cyrillic, fingerprint: icon(1), samples: 1)])
+        #expect(spelled.match(icon(1))?.identity.itemID(rarity: .epic) == "ar:epic:ak")
+        // A clear winner keeps its name.
+        let clear = IconLibrary(entries: [IconEntry(identity: m4, fingerprint: icon(1), samples: 1), IconEntry(identity: ak, fingerprint: icon(2), samples: 1)])
+        #expect(clear.match(icon(1))?.identity.name == "M4")
     }
 }

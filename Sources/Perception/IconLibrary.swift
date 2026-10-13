@@ -27,10 +27,11 @@ public struct ItemIdentity: Codable, Equatable, Hashable, Sendable {
             return nil
         }
     }
-    /// The catalog ID for this item at a tile's rarity. Light tiles hold common weapons.
-    public func itemID(rarity: Rarity?) -> String? {
+    /// The catalog ID for this item at a tile's rarity, naming the gun when the catalog knows it. Light tiles hold
+    /// common weapons.
+    public func itemID(rarity: Rarity?, catalog: ItemCatalog = .standard) -> String? {
         switch kind {
-        case .weapon: return weaponClass.map { ItemCatalog.weaponID($0, rarity ?? .common) }
+        case .weapon: return weaponClass.map { catalog.weaponID($0, rarity ?? .common, name: name) }
         case .healing: return healID
         case .throwable: return ItemCatalog.throwableID
         case .melee: return ItemCatalog.fistsID
@@ -74,9 +75,14 @@ public final class IconLibrary: @unchecked Sendable {
         }
         let ranked = best.sorted { $0.value > $1.value }
         guard let top = ranked.first, top.value >= Self.matchThreshold else { return nil }
-        // Same class under another name is not a conflict for the decisions that matter.
-        if let second = ranked.dropFirst().first(where: { $0.key.kind != top.key.kind || $0.key.weaponClass != top.key.weaponClass || $0.key.healID != top.key.healID }),
-           top.value - second.value < Self.matchMargin { return nil }
+        let close = ranked.dropFirst().filter { top.value - $0.value < Self.matchMargin }
+        if close.contains(where: { $0.key.kind != top.key.kind || $0.key.weaponClass != top.key.weaponClass || $0.key.healID != top.key.healID }) { return nil }
+        // Another gun of the same class about as close: the class is certain, the gun is not. A name decides how good
+        // the gun is, so it is left out rather than guessed. Names that differ only in OCR'd look-alikes are one gun.
+        if top.key.kind == .weapon, close.contains(where: { ItemCatalog.nameKey($0.key.name) != ItemCatalog.nameKey(top.key.name) }) {
+            var unnamed = top.key; unnamed.name = ""
+            return (unnamed, top.value)
+        }
         return (top.key, top.value)
     }
 

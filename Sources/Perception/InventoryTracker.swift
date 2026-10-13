@@ -21,6 +21,8 @@ public final class InventoryTracker {
     public struct Learned: Sendable { public var slot: Int; public var identity: ItemIdentity; public var time: Double }
 
     public let library: IconLibrary
+    /// Names the guns in slot IDs.
+    public let catalog: ItemCatalog
     private var states: [Int: SlotState] = [:]
     private var lastItemPrompt: (prompt: InteractionPrompt, seen: Double)?
     private var pending: [Change] = []
@@ -35,7 +37,7 @@ public final class InventoryTracker {
     /// Seconds an ammunition readout must contradict a consumable on the selected slot before that identity is dropped.
     public static let conflictDelay = 0.4
 
-    public init(library: IconLibrary) { self.library = library }
+    public init(library: IconLibrary, catalog: ItemCatalog = .standard) { self.library = library; self.catalog = catalog }
     public func reset() { states = [:]; lastItemPrompt = nil; pending = [] }
 
     static func sameItem(_ a: IconFingerprint, _ b: IconFingerprint) -> Bool {
@@ -135,7 +137,7 @@ public final class InventoryTracker {
             if reading.index == 1 { return InventorySlot(1, itemID: ItemCatalog.fistsID, count: 1, label: "Melee", confidence: 1) }
             guard reading.occupied else { return InventorySlot(reading.index, count: 0, confidence: 1) }
             guard let state = states[reading.index], let identity = state.identity,
-                  let itemID = identity.itemID(rarity: reading.rarity) else {
+                  let itemID = identity.itemID(rarity: reading.rarity, catalog: catalog) else {
                 return InventorySlot(reading.index, count: counts[reading.index] ?? 1, rarity: reading.rarity, confidence: 0.5)
             }
             var slot = InventorySlot(reading.index, itemID: itemID, count: 1, rarity: identity.kind == .weapon ? (reading.rarity ?? .common) : reading.rarity,

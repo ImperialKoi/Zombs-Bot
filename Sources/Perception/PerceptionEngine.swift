@@ -53,7 +53,7 @@ public final class PerceptionEngine {
 
     public init(artifacts: URL?, settings: PerceptionSettings, library: IconLibrary, text: TextReader) {
         self.settings = settings; self.text = text
-        inventory = InventoryTracker(library: library)
+        inventory = InventoryTracker(library: library, catalog: settings.catalog)
         if let artifacts {
             do { detector = try SceneDetector(artifacts: artifacts); detectorProblem = nil }
             catch { detector = nil; detectorProblem = error.localizedDescription }

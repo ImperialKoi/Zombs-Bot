@@ -60,7 +60,7 @@ public enum HUDText {
         if let first = words.first, let rarity = Rarity(word: first) {
             let phrase = words.dropFirst().joined(separator: " ").lowercased()
             if let weaponClass = catalog.classWords[phrase] {
-                return InteractionPrompt(name: name, subtitle: subtitle, kind: .weapon, itemID: ItemCatalog.weaponID(weaponClass, rarity),
+                return InteractionPrompt(name: name, subtitle: subtitle, kind: .weapon, itemID: catalog.weaponID(weaponClass, rarity, name: name),
                                          weaponClass: weaponClass, rarity: rarity, count: count, confidence: confidence)
             }
             if catalog.throwableWords.contains(where: { phrase.contains($0) }) {
