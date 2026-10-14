@@ -43,7 +43,9 @@ struct Dashboard:View {
                         Toggle("Aim, shoot & switch guns",isOn:$model.features.combat)
                         Toggle("Pick up guns & heals",isOn:$model.features.loot)
                         Toggle("Open chests & crates",isOn:$model.features.chests)
-                        Toggle("Carry the sniper when it's quiet",isOn:$model.features.idleWeapon)
+                        Toggle("Carry the sniper or bow (close gun indoors)",isOn:$model.features.idleWeapon)
+                        Toggle("Fire after opponents leaving view",isOn:$model.features.unseenFire)
+                        Toggle("Fire back at rounds from out of view",isOn:$model.features.returnFire)
                         Toggle("Reverse Impulse combos",isOn:$model.features.combos)
                         Toggle("Heal you and teammates",isOn:$model.features.healing)
                         Button(model.armed ? "Turn off supervised input" : "Enable supervised input",systemImage:model.armed ? "power" : "play.fill") {
@@ -238,7 +240,26 @@ struct DiagnosticCanvas:View {
                             for area in report.observation.hudAreas { context.stroke(Path(box(area)),with:.color(.red.opacity(0.55)),style:StrokeStyle(lineWidth:1,dash:[3,3])) }
                             context.stroke(Path(ellipseIn:CGRect(x:p.x*sw-r,y:p.y*sh-r,width:2*r,height:2*r)),with:.color(.orange.opacity(0.35)),lineWidth:1)
                         }
+                        // Rounds in flight: a line along their way, cyan once confirmed; their trail's end as a dot.
+                        for b in report.observation.bullets {
+                            let c=CGPoint(x:b.position.x*sw,y:b.position.y*sh), d=CGPoint(x:b.direction.x*14,y:b.direction.y*14)
+                            var path=Path(); path.move(to:CGPoint(x:c.x-d.x,y:c.y-d.y)); path.addLine(to:CGPoint(x:c.x+d.x,y:c.y+d.y))
+                            context.stroke(path,with:.color(b.confirmed ? .cyan : .cyan.opacity(0.35)),lineWidth:b.confirmed ? 2.5 : 1)
+                            if let tail=b.tail { context.fill(Path(ellipseIn:CGRect(x:tail.x*sw-2,y:tail.y*sh-2,width:4,height:4)),with:.color(.cyan.opacity(0.6))) }
+                        }
+                        // Opponents out of sight, where they are estimated: on screen, or on its edge pointing their way.
+                        for e in report.unseen {
+                            let p=CGPoint(x:min(max(e.position.x,0.01),0.99)*sw,y:min(max(e.position.y,0.01),0.99)*sh)
+                            let r=max(6,e.spread*sw*2)
+                            context.stroke(Path(ellipseIn:CGRect(x:p.x-r,y:p.y-r,width:2*r,height:2*r)),with:.color(.pink),style:StrokeStyle(lineWidth:2,dash:[4,3]))
+                            let label=e.source == .left ? "left view" : "shooting \(e.ammo?.rawValue ?? "")"
+                            context.draw(Text(label).font(.system(size:10,design:.monospaced)).foregroundColor(.pink),at:CGPoint(x:p.x,y:p.y+r+7))
+                        }
                         for intent in report.decision.intents {
+                            if case .fireUnseen(let p)=intent {
+                                let c=CGPoint(x:min(max(p.x,0.01),0.99)*sw,y:min(max(p.y,0.01),0.99)*sh)
+                                context.stroke(Path(ellipseIn:CGRect(x:c.x-10,y:c.y-10,width:20,height:20)),with:.color(.red),style:StrokeStyle(lineWidth:2,dash:[2,2]))
+                            }
                             if case .aim(let p)=intent {
                                 let c=CGPoint(x:p.x*sw,y:p.y*sh)
                                 context.stroke(Path(ellipseIn:CGRect(x:c.x-8,y:c.y-8,width:16,height:16)),with:.color(.red),lineWidth:2)

@@ -138,6 +138,18 @@ public final class Coordinator {
     private var zones: [HealZone] = []
     /// Your own Healing Grenade's circle: seconds until it closes, and whether you stand in it. The app asks you to stay in it.
     public private(set) var healCircle: (seconds: Double, inside: Bool)?
+    /// Opponents out of sight: ones that walked out of view, and ones shooting at you from beyond it (see `EnemyMemory`).
+    public private(set) var memory = EnemyMemory()
+    /// The last sign of a fight: an opponent engaged in view, a hit taken, or a round of an opponent in view flying at you.
+    private var lastFight = -Double.infinity
+    /// When you were last hit (`hit`).
+    private var lastDamage = -Double.infinity
+    /// When you last pressed a key or a mouse button, or scrolled (`Observation.manualOverride`).
+    private var lastManualInput = -Double.infinity
+    /// When walls or doors were last close around you (`Policy.closeQuarters`).
+    private var lastCloseQuarters = -Double.infinity
+    /// Why an opponent out of sight is not being fired at, for the status line.
+    private var unseenNote: String?
 
     public init(profiles: [ItemProfile], settings: CombatSettings = .init()) {
         self.profiles = Dictionary(profiles.filter(\.isValid).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -155,6 +167,7 @@ public final class Coordinator {
         lastRequested = nil; lastSelection = nil; userChoiceUntil = -.infinity; lootNote = nil; lastIdleRequest = -.infinity
         combo = nil; lastCombo = -.infinity; lastUserSlotChange = -.infinity; liveGrenade = nil
         support = nil; supportPaused = [:]; zones = []; healCircle = nil
+        memory.reset(); lastFight = -.infinity; lastDamage = -.infinity; lastManualInput = -.infinity; lastCloseQuarters = -.infinity; unseenNote = nil
     }
     /// A target missed for less than this keeps its distance band and identity.
     static let targetMemory = 1.0
@@ -187,6 +200,12 @@ public final class Coordinator {
     /// A Healing Grenade lands where a moving teammate will be this many seconds after the click: its circle opens about a
     /// second later, but it is wide, and a teammate who sees it stops in it.
     static let grenadeLead = 0.3
+    /// A slot change counts as yours only this soon after a key or button of yours: the game may also change the selection
+    /// itself, say when the last potion of a slot is drunk, and that must not keep the idle weapon away for long.
+    static let manualWindow = 2.0
+    /// Close quarters last this long after walls or doors were last seen close around you, so a door frame does not flip
+    /// the carried gun back and forth; and a failed idle selection is tried again after `idleRetry`.
+    static let closeQuartersHold = 1.5, idleRetry = 2.0
 
     private func profile(_ slot: InventorySlot) -> ItemProfile? {
         guard slot.confidence >= 0.98, let id = slot.itemID, let p = profiles[id], p.verified else { return nil }
@@ -203,6 +222,8 @@ public final class Coordinator {
     /// Class preference inside a distance band; nil when the weapon is never used there.
     /// The close band prefers shotguns, the medium band assault rifles, the long band snipers.
     public static func preference(_ p: ItemProfile, band: WeaponRole) -> Double? {
+        // A bow fights at long range like a sniper, below one even of a lower rarity, and is never picked up for you.
+        if Policy.isBow(p) { return band == .long ? 90 : nil }
         guard p.kind == .weapon, let role = p.role else { return nil }
         let weaponClass = p.weaponClass ?? (role == .close ? .shotgun : role == .long ? .sniper : .ar)
         let table: [WeaponClass: Double]
@@ -264,6 +285,9 @@ public final class Coordinator {
     public func step(_ o: Observation, now t: Double) -> Decision {
         if let live = liveGrenade, t > live.explodes + 0.3 { liveGrenade = nil }
         followZones(o, now: t)
+        // Opponents out of sight are followed in every frame, also while you have control.
+        memory.update(o, zoom: viewZoom(o, keeping: memory.zoom), settings: settings)
+        if o.manualOverride { lastManualInput = t }
         if let reason = Policy.haltReason(o, now: t) {
             pending = nil; heal = nil; healPlan = nil; recovery = nil; targetID = nil; lastThreat = t; priorWeaponSlot = nil; band = nil
             healAttempts = []; inHandSince = nil // A halted heal did not fail.
@@ -282,9 +306,10 @@ public final class Coordinator {
         // A combo's spot moves on screen with you in every frame, also while a slot switch is on its way.
         if var c = combo, var mark = c.mark { mark.follow(o, zoom: viewZoom(o, keeping: mark.zoom)); c.mark = mark; combo = c }
         if lastThreat == nil { lastThreat = t }
-        lootNote = nil
+        lootNote = nil; unseenNote = nil
         if o.selectedSlotConfidence >= 0.98, let current = o.selectedSlot {
-            if let previous = lastSelection, previous != current, !(lastRequested.map { $0.slot == current && t - $0.time <= 2 } ?? false) {
+            if let previous = lastSelection, previous != current, !(lastRequested.map { $0.slot == current && t - $0.time <= 2 } ?? false),
+               t - lastManualInput <= Self.manualWindow {
                 userChoiceUntil = t + settings.idleUserRespect; lastUserSlotChange = t
             }
             lastSelection = current
@@ -292,6 +317,9 @@ public final class Coordinator {
         let damaged = hit(o, now: t)
         let threatened = Policy.immediateThreat(o, settings) || damaged
         if threatened { lastThreat = t }
+        if damaged { lastFight = t; lastDamage = t }
+        lastFight = max(lastFight, memory.lastShotFromView)
+        if Policy.closeQuarters(o) { lastCloseQuarters = t }
         // A confirmed player anywhere in view delays the next heal. A real player is confirmed within a few frames;
         // counting unconfirmed one-frame detections made heals start and stop over and over.
         if Policy.playerInView(o) { lastPlayerSeen = t }
@@ -304,8 +332,8 @@ public final class Coordinator {
             default: break
             }
         }
-        // Healing starts only after two seconds without a threat or a confirmed player in view.
-        let safeToHeal = !threatened && t - (lastThreat ?? t) >= 2 && t - lastPlayerSeen >= 2 && t >= healPausedUntil
+        // Healing starts only after two seconds without a threat, a confirmed player in view or a round flying at you.
+        let safeToHeal = !threatened && t - (lastThreat ?? t) >= 2 && t - lastPlayerSeen >= 2 && t - memory.lastIncoming >= 2 && t >= healPausedUntil
         pickupBlockedUntil = pickupBlockedUntil.filter { $0.value > t }
         chestBlockedUntil = chestBlockedUntil.filter { $0.value > t }
         // Presses count toward one item or chest; once the panel names something else, that one is over.
@@ -479,26 +507,31 @@ public final class Coordinator {
             return Decision(o.timestamp, [.releaseAll,.reload], "Reload empty weapon")
         }
         if features.combat, features.idleWeapon, let decision = idleWeapon(o, now: t) { return decision }
-        return idle(o.timestamp, holdReason(o) ?? lootNote ?? "Observing")
+        return idle(o.timestamp, holdReason(o) ?? unseenNote ?? lootNote ?? "Observing")
     }
 
-    /// With nothing going on, carry the long-range gun: most fights start at a distance. Waits for a quiet spell and a
-    /// while after the last fight, and leaves a slot you picked yourself alone for `idleUserRespect`.
+    /// With nothing going on, carry the long-range gun: a sniper, a bow, else a DMR or an AR. Most fights start at a
+    /// distance, and a sniper's or bow's zoomed-out view shows more. In close quarters, such as inside a house, carry the
+    /// close-range gun instead. Waits for a quiet spell (no threat, player in view, round flying at you or opponent just
+    /// out of view) and a while after the last fight, and leaves a slot you picked yourself alone for `idleUserRespect`.
     private func idleWeapon(_ o: Observation, now t: Double) -> Decision? {
+        let lastStir = max(lastThreat ?? t, lastPlayerSeen, memory.lastIncoming, memory.entries.map(\.lastSeen).max() ?? -.infinity)
         guard t >= userChoiceUntil, heal == nil, healPlan == nil, support == nil, o.selectedSlotConfidence >= 0.98,
-              t - (lastThreat ?? t) >= settings.idleQuiet, t - lastPlayerSeen >= settings.idleQuiet,
-              t - lastTargetSeen >= settings.idleAfterFight else { return nil }
+              t - lastStir >= settings.idleQuiet, t - lastTargetSeen >= settings.idleAfterFight else { return nil }
+        let indoors = t - lastCloseQuarters <= Self.closeQuartersHold
+        let band: WeaponRole = indoors ? .close : .long
         let guns = o.inventory.compactMap { slot -> (InventorySlot, ItemProfile)? in
-            guard let p = profile(slot), p.kind == .weapon, slot.hasAnyAmmo, noAmmoUntil[slot.index] == nil else { return nil }
+            guard let p = profile(slot), p.kind == .weapon, p.role != nil || Policy.isBow(p), slot.hasAnyAmmo, noAmmoUntil[slot.index] == nil
+            else { return nil }
             return (slot, p)
         }
         let best = Self.rarestOfEachClass(guns).compactMap { slot, p -> (slot: InventorySlot, item: ItemProfile, score: Double)? in
-            guard let score = Self.bandScore(p, band: .long) else { return nil }
+            guard let score = Self.bandScore(p, band: band) else { return nil }
             return (slot, p, score + (slot.index == o.selectedSlot ? 4 : 0))
         }.max { $0.score < $1.score }
-        guard let best, best.slot.index != o.selectedSlot, t - lastIdleRequest >= 5 else { return nil }
+        guard let best, best.slot.index != o.selectedSlot, t - lastIdleRequest >= Self.idleRetry else { return nil }
         lastIdleRequest = t
-        return select(best.slot, in: o, now: t, reason: "Carry \(best.item.name) while nothing is happening")
+        return select(best.slot, in: o, now: t, reason: indoors ? "Carry \(best.item.name) in close quarters" : "Carry \(best.item.name) while nothing is happening")
     }
 
     /// Combat damage since about `damageWindow` ago: a shield hit, or a health hit too big for a storm tick.
@@ -682,9 +715,10 @@ public final class Coordinator {
         guard var target = targets.first else {
             // A target missed briefly keeps its band, so its return does not count as a new range.
             if t - lastTargetSeen > Self.targetMemory { targetID = nil; band = nil }
-            return nil
+            // Nobody in the open: one that just walked out of view, or one shooting at you from beyond it.
+            return unseenCombat(o, now: t)
         }
-        lastTargetSeen = t
+        lastTargetSeen = t; lastFight = t
         if let old = targets.first(where: { $0.id == targetID }), old.position.distance(to: o.player, aspect: o.aspect) < target.position.distance(to: o.player, aspect: o.aspect) * 1.5 { target = old }
         targetID = target.id
         // Distances are in the default view's widths: a sniper zooms out, which shrinks everything on screen, and an
@@ -694,7 +728,7 @@ public final class Coordinator {
         let band = band(for: distance)
         self.band = band
         let carried = o.inventory.compactMap { slot -> (InventorySlot, ItemProfile)? in
-            guard let p = profile(slot), p.kind == .weapon, p.role != nil, slot.hasAnyAmmo else { return nil }
+            guard let p = profile(slot), p.kind == .weapon, p.role != nil || Policy.isBow(p), slot.hasAnyAmmo else { return nil }
             return (slot, p)
         }
         // Exploding rounds hurt you too: a gun whose round would go off near you (the Assault SCAR on an opponent next to
@@ -755,6 +789,106 @@ public final class Coordinator {
         return Decision(o.timestamp, [.aim(aim),.fire], "Engage enemy at \(band.rawValue) range with \(p.name)")
     }
 
+    /// An opponent out of sight is fired at with a gun whose range is at least its estimated distance over this: where it
+    /// is, is an estimate.
+    static let unseenReach = 1.2
+    /// Nor at one estimated this close to a teammate or a player not known to be an opponent (view widths).
+    static let unseenClearance = 0.06
+    /// The guns that fire an ammunition family, as the status line names them.
+    static func gunName(_ ammo: AmmoFamily?) -> String {
+        switch ammo { case .small?: return "SMG"; case .medium?: return "AR"; case .large?: return "sniper"; case .shells?: return "shotgun"; case nil: return "gun" }
+    }
+    /// Which way `p` lies from you, for the status line: after "from" ("from above", "from the left"), or else after "now"
+    /// ("now above", "now to the left").
+    static func bearing(of p: Point, from player: Point, aspect: Double, afterFrom: Bool) -> String {
+        let angle: Double = atan2(-(p.y - player.y) / aspect, p.x - player.x)
+        let turn: Double = (angle + 2 * Double.pi + Double.pi / 8).truncatingRemainder(dividingBy: 2 * Double.pi)
+        let sector = Int(turn / (Double.pi / 4)) % 8
+        return (afterFrom ? ["the right", "the upper right", "above", "the upper left", "the left", "the lower left", "below", "the lower right"]
+                : ["to the right", "up to the right", "above", "up to the left", "to the left", "down to the left", "below", "down to the right"])[sector]
+    }
+
+    /// Fires at an opponent out of sight (`EnemyMemory`), with a mid- or long-range gun or a bow:
+    /// - one that walked out of view, for `CombatSettings.unseenFireFor` seconds, where its course takes it;
+    /// - one shooting at you from out of view, for `returnFireFor` seconds after its last round flew at you, back along their
+    ///   path: a sniper's rounds always, an AR's, SMG's or shotgun's only within `recentFight` seconds of a fight. In Duo and
+    ///   Squad, also only once a round has hit you meanwhile: your teammates' rounds look alike, and the detector does not
+    ///   always see the teammate who fired one.
+    /// A heal under way comes first. Nil when there is nobody to fire at, or nothing that reaches.
+    private func unseenCombat(_ o: Observation, now t: Double) -> Decision? {
+        guard heal == nil, healPlan == nil, support == nil, o.selectedSlotConfidence >= 0.98 else { return nil }
+        let fight = t - lastFight <= settings.recentFight
+        var due: [(entry: EnemyMemory.Entry, what: String, since: Double)] = []
+        // Never where a teammate or a player not known to be an opponent stands: the estimate may be that player.
+        let others = o.players.filter { $0.affiliation != .enemy && $0.position.isInViewport }
+        for e in memory.entries where !others.contains(where: { $0.position.distance(to: e.position, aspect: o.aspect) <= Self.unseenClearance }) {
+            if features.returnFire, let shot = e.lastBullet, t - shot <= settings.returnFireFor {
+                let gun = Self.gunName(e.ammo), way = Self.bearing(of: e.position, from: o.player, aspect: o.aspect, afterFrom: true)
+                let fire = gun == "gun" ? "Gunfire" : gun.prefix(1).uppercased() + gun.dropFirst() + " fire"
+                if o.teamMode, e.source != .left, t - lastDamage > settings.returnFireFor {
+                    unseenNote = "\(fire) from \(way), but no hit taken: maybe a teammate's; not firing back"
+                } else if e.ammo == .large || fight || e.source == .left {
+                    due.append((e, "Fire back at the \(gun) shooting from \(way)", shot)); continue
+                } else { unseenNote = "\(fire) from \(way), and no fight lately: not firing back" }
+            }
+            if features.unseenFire, e.source == .left, t - e.lastSeen <= settings.unseenFireFor,
+               !EnemyMemory.inside(e.position, by: EnemyMemory.edgeBand, aspect: o.aspect) {
+                due.append((e, "Fire at the opponent that went out of view, now \(Self.bearing(of: e.position, from: o.player, aspect: o.aspect, afterFrom: false))", e.lastSeen))
+            }
+        }
+        // The latest sign first.
+        guard let (target, what, _) = due.max(by: { $0.since < $1.since }) else { return nil }
+        // Distances in the default view's widths, as the gun in hand's zoom shows them.
+        let zoom = o.selected.flatMap { profile($0) }?.zoom ?? 1
+        let distance = target.position.distance(to: o.player, aspect: o.aspect) * zoom
+        let band: WeaponRole = distance > settings.longCutoff ? .long : .medium
+        let toward = Policy.visiblePart(toward: target.position, in: o)
+        let guns = o.inventory.compactMap { slot -> (InventorySlot, ItemProfile)? in
+            guard let p = profile(slot), Policy.reachesFar(p), p.fuse == 0, !Policy.isHealingGun(p), slot.hasAnyAmmo, noAmmoUntil[slot.index] == nil
+            else { return nil }
+            return (slot, p)
+        }
+        let ranked = Self.rarestOfEachClass(guns).compactMap { slot, p -> (InventorySlot, ItemProfile, Double)? in
+            guard distance <= p.maxRange * Self.unseenReach, Policy.explosiveSafe(o, weapon: p, toward: toward, zoom: zoom),
+                  var score = Self.bandScore(p, band: band) ?? Self.bandScore(p, band: band == .long ? .medium : .long).map({ $0 - 30 })
+            else { return nil }
+            if slot.index == o.selectedSlot {
+                score += 4
+                if slot.ammo == 0 { score -= 30 }
+            }
+            return (slot, p, score)
+        }.sorted { $0.2 > $1.2 }
+        guard var (slot, p, _) = ranked.first else {
+            unseenNote = "\(what): no mid- or long-range gun reaches"
+            return nil
+        }
+        if o.selectedSlot != slot.index {
+            // A gun in hand that still reaches keeps firing until the dwell time has passed.
+            if let held = ranked.first(where: { $0.0.index == o.selectedSlot }), (held.0.ammo ?? 1) > 0, t - lastRangeSwitch < settings.switchDwell {
+                (slot, p) = (held.0, held.1)
+            } else {
+                lastRangeSwitch = t
+                return select(slot, in: o, now: t, reason: "\(what): select \(p.name)")
+            }
+        }
+        if slot.ammo == 0 {
+            guard (slot.reserveAmmo ?? 0) > 0 else { return idle(o.timestamp, "Selected weapon is out of ammunition") }
+            pending = .reload(slot: slot.index, deadline: t + p.reloadDuration + 1)
+            return Decision(o.timestamp, [.releaseAll, .reload], "Reload selected weapon")
+        }
+        guard let point = Targeting.unseenIntercept(position: target.position, velocity: target.velocity, in: o, weapon: p, now: t,
+                                                    settings: settings) else { return nil }
+        // The game fires along the line through the cursor: the crosshair goes that way, within its circle.
+        let aim = Targeting.cursor(toward: point, from: o.player, aspect: o.aspect, radius: settings.aimRadius, avoiding: o.hudAreas).point
+        guard Policy.canFireUnseen(o, toward: point) else { return Decision(o.timestamp, [.releaseAll, .aim(aim)], "\(what): the way is blocked") }
+        guard Policy.explosiveSafe(o, weapon: p, toward: Policy.visiblePart(toward: point, in: o), zoom: p.zoom) else {
+            return Decision(o.timestamp, [.releaseAll, .aim(aim)], "Holding fire: \(p.name)'s explosion would hit you too")
+        }
+        if !p.automatic && t - lastShot < p.shotInterval { return Decision(o.timestamp, [.releaseAll, .aim(aim)], "Weapon cooldown") }
+        lastShot = t
+        return Decision(o.timestamp, [.aim(aim), .fireUnseen(point)], "\(what), with \(p.name)")
+    }
+
     /// The view's zoom: the item in hand's. While the selection is unreadable, the last one is kept.
     private func viewZoom(_ o: Observation, keeping last: Double) -> Double {
         o.selectedSlotConfidence >= 0.98 ? (o.selected.flatMap { profile($0) }?.zoom ?? 1) : last
@@ -790,7 +924,7 @@ public final class Coordinator {
         }
         guard features.combos else { return end(nil) }
         guard let pull = profiles[c.plan.pull], let follow = profiles[c.plan.follow] else { return end(nil) }
-        lastTargetSeen = t
+        lastTargetSeen = t; lastFight = t
         let zoom = viewZoom(o, keeping: c.mark?.zoom ?? 1)
         // The opponent: its track, or an enemy right where it was (a track can be lost and found again).
         if let seen = o.players.first(where: { $0.id == c.plan.target && Policy.validEnemy($0, settings) }) {

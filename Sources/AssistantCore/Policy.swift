@@ -21,10 +21,19 @@ public struct CombatSettings: Codable, Equatable, Sendable {
     /// Seconds over which an opponent's current velocity is expected to last: players strafe and turn, so a full
     /// constant-velocity lead overshoots them on long shots. 0 keeps the full lead.
     public var leadPersistence = 1.0
-    /// The long-range gun is taken after this many seconds without a threat or a player in view…
-    public var idleQuiet = 2.5
+    /// The long-range gun (or, in close quarters, the close-range one) is taken after this many seconds without a threat,
+    /// a player in view, a bullet flying at you or an opponent just out of view…
+    public var idleQuiet = 1.5
     /// …and this many seconds after the last fight.
-    public var idleAfterFight = 8.0
+    public var idleAfterFight = 4.0
+    /// Seconds after an opponent walks out of view that the assistant keeps firing where its course takes it, with a mid- or
+    /// long-range gun or a bow (see `EnemyMemory`).
+    public var unseenFireFor = 1.5
+    /// Seconds after a bullet flies at you that the assistant keeps firing back at its shooter, located from its bullets.
+    public var returnFireFor = 1.5
+    /// A fight within this many seconds is recent: AR, SMG and shotgun fire from out of view is fired back at only then.
+    /// Sniper fire always is.
+    public var recentFight = 10.0
     /// Seconds a slot you pick yourself is left alone by the idle weapon.
     public var idleUserRespect = 30.0
     /// The cursor stays within this many view heights of your character (see `Targeting.cursor`); the aim keeps its
@@ -57,6 +66,9 @@ public struct CombatSettings: Codable, Equatable, Sendable {
         idleQuiet = try c.decodeIfPresent(Double.self, forKey: .idleQuiet) ?? d.idleQuiet
         idleAfterFight = try c.decodeIfPresent(Double.self, forKey: .idleAfterFight) ?? d.idleAfterFight
         idleUserRespect = try c.decodeIfPresent(Double.self, forKey: .idleUserRespect) ?? d.idleUserRespect
+        unseenFireFor = try c.decodeIfPresent(Double.self, forKey: .unseenFireFor) ?? d.unseenFireFor
+        returnFireFor = try c.decodeIfPresent(Double.self, forKey: .returnFireFor) ?? d.returnFireFor
+        recentFight = try c.decodeIfPresent(Double.self, forKey: .recentFight) ?? d.recentFight
         aimRadius = try c.decodeIfPresent(Double.self, forKey: .aimRadius) ?? d.aimRadius
         lowHealth = try c.decodeIfPresent(Double.self, forKey: .lowHealth) ?? d.lowHealth
         earlyGame = try c.decodeIfPresent(Double.self, forKey: .earlyGame) ?? d.earlyGame
@@ -68,6 +80,7 @@ public struct CombatSettings: Codable, Equatable, Sendable {
         && (0...1).contains(minPlayerConfidence) && (0...1).contains(minAffiliationConfidence) && (0...5).contains(minHealSlots)
         && (0...0.3).contains(leadLatency) && (0...10).contains(leadPersistence) && (0.5...30).contains(idleQuiet) && (0...60).contains(idleAfterFight) && (0...600).contains(idleUserRespect)
         && (0.1...0.45).contains(aimRadius) && (0...100).contains(lowHealth) && (0...900).contains(earlyGame) && (0.1...1.25).contains(throwRadius)
+        && (0...5).contains(unseenFireFor) && (0...5).contains(returnFireFor) && (0...120).contains(recentFight)
     }
 }
 
@@ -158,6 +171,64 @@ public enum Policy {
         p.affiliation == .enemy && p.confirmed && p.confidence >= s.minPlayerConfidence && p.affiliationConfidence >= s.minAffiliationConfidence
         && p.position.isInViewport && p.velocity.isFinite
     }
+    /// A bow (the XBow, the Crossbow): one heavy arrow at a time, with a sniper's zoomed-out view. Never picked up for you,
+    /// but carried and fired at long range like a sniper.
+    public static func isBow(_ p: ItemProfile) -> Bool {
+        p.kind == .weapon && p.weaponClass == .special && p.role == nil && p.zoom > 1 && p.projectileSpeed > 0
+        && p.healthGain == 0 && p.radius == 0 && p.fuse == 0
+    }
+    /// A gun for an opponent out of view (`InputIntent.fireUnseen`): one for mid or long range, or a bow.
+    public static func reachesFar(_ p: ItemProfile) -> Bool { p.kind == .weapon && (p.role == .medium || p.role == .long || isBow(p)) }
+    /// Where the line from you toward `p` leaves the view, a hair inside it; `p` itself when it is in view, unless `throughView`,
+    /// which follows the line on to the view's edge.
+    public static func visiblePart(toward p: Point, in o: Observation, throughView: Bool = false) -> Point {
+        guard p.isFinite, throughView || !p.isInViewport else { return p }
+        let d = p - o.player
+        var s = Double.infinity
+        for (from, delta) in [(o.player.x, d.x), (o.player.y, d.y)] where abs(delta) > 1e-12 {
+            s = min(s, ((delta > 0 ? 0.999 : 0.001) - from) / delta)
+        }
+        return s.isFinite ? o.player + d * max(0, s) : p
+    }
+    /// Whether a shot at an opponent out of sight at `p` (`InputIntent.fireUnseen`) is clear as far as the view shows: no
+    /// wall, door or chest before it, and no teammate or unknown player anywhere on the line to the view's edge, as the round
+    /// flies on past where the opponent is estimated.
+    public static func canFireUnseen(_ o: Observation, toward p: Point) -> Bool {
+        guard p.isFinite, canFireToward(o, at: visiblePart(toward: p, in: o)) else { return false }
+        let edge = visiblePart(toward: p, in: o, throughView: true)
+        return !o.players.contains { $0.affiliation != .enemy && Rect($0.position.x - 0.018, $0.position.y - 0.025, 0.036, 0.05).intersectsSegment(from: o.player, to: edge) }
+    }
+    /// Whether the aim at `aim` points the way of `p`, within about a degree: the game fires along the line through the cursor.
+    public static func sameDirection(_ aim: Point, _ p: Point, from player: Point, aspect: Double) -> Bool {
+        let a = Point(aim.x - player.x, (aim.y - player.y) / aspect), b = Point(p.x - player.x, (p.y - player.y) / aspect)
+        guard a.length > 1e-6, b.length > 1e-6 else { return false }
+        return (a.x * b.x + a.y * b.y) / (a.length * b.length) >= cos(0.02)
+    }
+
+    // MARK: Close quarters
+
+    /// Rays from you, how far they look for a wall or door, and how many must meet one for close quarters, such as inside a
+    /// house: there the close-range gun is carried instead of the long-range one.
+    public static let closeQuartersRays = 8, closeQuartersRange = 0.12, closeQuartersHits = 4
+    /// Walls or doors close around you: of `closeQuartersRays` rays in every direction, `closeQuartersHits` meet one within
+    /// `closeQuartersRange` view widths. A wall or door reported where you stand is your character misread and does not count.
+    public static func closeQuarters(_ o: Observation) -> Bool {
+        let hits = closeQuartersRays(o)
+        return hits.filter { $0 }.count >= closeQuartersHits
+    }
+    /// For each of `closeQuartersRays` rays from you, counterclockwise from the right, whether it meets a wall or door
+    /// within `closeQuartersRange`.
+    public static func closeQuartersRays(_ o: Observation, range: Double = closeQuartersRange) -> [Bool] {
+        guard o.player.isInViewport, o.aspect.isFinite, o.aspect > 0 else { return [] }
+        let walls = solid(o).filter { $0.kind == .wall || $0.kind == .door }
+        guard !walls.isEmpty else { return Array(repeating: false, count: closeQuartersRays) }
+        return (0..<closeQuartersRays).map { i in
+            let angle = 2 * Double.pi * Double(i) / Double(closeQuartersRays)
+            let end = Point(o.player.x + cos(angle) * range, o.player.y - sin(angle) * range * o.aspect)
+            return walls.contains { $0.cells.contains { $0.intersectsSegment(from: o.player, to: end) } }
+        }
+    }
+
     /// A teammate to heal: confirmed, known by the tag above their head, in view.
     public static func validTeammate(_ p: PlayerTrack, _ s: CombatSettings = .init()) -> Bool {
         p.affiliation == .teammate && p.confirmed && p.confidence >= s.minPlayerConfidence && p.affiliationConfidence >= s.minAffiliationConfidence
@@ -316,7 +387,8 @@ public struct ActionGuard {
             return prompt.kind == .chest && prompt.name == name
         case .fire:
             guard let selected = o.selected, selected.confidence >= 0.98, o.selectedSlotConfidence >= 0.98,
-                  let item = selected.itemID.flatMap({ profiles[$0] }), item.verified, item.isValid, item.kind == .weapon, item.role != nil,
+                  let item = selected.itemID.flatMap({ profiles[$0] }), item.verified, item.isValid, item.kind == .weapon,
+                  item.role != nil || Policy.isBow(item),
                   selected.hasAnyAmmo, (selected.ammo ?? 1) > 0, let aim, Policy.canFireToward(o, at: aim),
                   Policy.explosiveSafe(o, weapon: item, toward: aim, zoom: item.zoom) else { return false }
             return o.players.contains {
@@ -337,6 +409,16 @@ public struct ActionGuard {
             return o.players.contains {
                 $0.affiliation == .enemy && $0.affiliationConfidence >= settings.minAffiliationConfidence && $0.position.distance(to: aim, aspect: o.aspect) <= reach
             }
+        case .fireUnseen(let target):
+            // An opponent out of view: only a mid- or long-range gun or a bow, never one whose rounds bounce around or heal.
+            guard let selected = o.selected, selected.confidence >= 0.98, o.selectedSlotConfidence >= 0.98,
+                  let item = selected.itemID.flatMap({ profiles[$0] }), item.verified, item.isValid, Policy.reachesFar(item),
+                  item.fuse == 0, !Policy.isHealingGun(item), selected.hasAnyAmmo, (selected.ammo ?? 1) > 0,
+                  let aim, aim.isInViewport, target.isFinite, Policy.sameDirection(aim, target, from: o.player, aspect: o.aspect) else { return false }
+            // As far as the view shows, nothing is in the way: no wall, door, chest, teammate or unknown player, and no
+            // exploding round goes off near you.
+            return Policy.canFireUnseen(o, toward: target)
+                && Policy.explosiveSafe(o, weapon: item, toward: Policy.visiblePart(toward: target, in: o), zoom: item.zoom)
         case .throwAt(let p):
             // A readout showing rounds means a gun is in hand, whatever the slot is labeled: the click would fire it.
             guard o.gunInHand != true, let selected = o.selected, selected.confidence >= 0.98, selected.count > 0, o.selectedSlotConfidence >= 0.98,

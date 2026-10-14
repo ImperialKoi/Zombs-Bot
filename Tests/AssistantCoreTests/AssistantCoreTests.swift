@@ -1100,20 +1100,22 @@ struct AssistantCoreTests {
     }
     @Test func testQuietSpellsCarryTheSniper() {
         let(c,base)=quietCarrier();var o=base
-        assertRelease(step(c,o));o.timestamp=2.0;assertRelease(step(c,o)) // Not quiet for 2.5 s yet.
-        o.timestamp=2.6;let d=step(c,o)
+        assertRelease(step(c,o));o.timestamp=1.0;assertRelease(step(c,o)) // Not quiet for 1.5 s yet.
+        o.timestamp=1.6;let d=step(c,o)
         expectTrue(d.intents.contains(.selectSlot(4)));expectEqual(d.reason,"Carry Rare SNIPER while nothing is happening")
-        o.timestamp=3.0;o.selectedSlot=4;_=step(c,o);o.timestamp=3.5;assertRelease(step(c,o))
-        // A player in view resets the quiet spell; a fight keeps the gun for 8 s afterwards.
+        o.timestamp=2.0;o.selectedSlot=4;_=step(c,o);o.timestamp=2.5;assertRelease(step(c,o))
+        // A player in view resets the quiet spell; a fight keeps the gun for 4 s afterwards.
         let(e,start)=quietCarrier();var p=start;p.players=[.init(id:9,position:.init(0.7,0.5),affiliation:.enemy,motion:.init(groundVelocity:Point()))]
-        _=step(e,p);p.players=[];p.timestamp=2.6;expectFalse(step(e,p).intents.contains(.selectSlot(4)))
-        p.timestamp=8.1;expectTrue(step(e,p).intents.contains(.selectSlot(4)))
+        _=step(e,p);p.players=[];p.timestamp=1.6;expectFalse(step(e,p).intents.contains(.selectSlot(4)))
+        p.timestamp=4.1;expectTrue(step(e,p).intents.contains(.selectSlot(4)))
     }
     @Test func testIdleWeaponLeavesYourOwnChoiceAlone() {
         let(c,base)=quietCarrier();var o=base
         _=step(c,o);o.timestamp=2.6;expectTrue(step(c,o).intents.contains(.selectSlot(4)))
         o.timestamp=3.0;o.selectedSlot=4;_=step(c,o)
-        o.timestamp=5.0;o.selectedSlot=3;assertRelease(step(c,o)) // You picked the AR yourself.
+        // You pick the AR yourself: the assistant yields while you press the key, then the slot shows.
+        o.timestamp=4.9;o.manualOverride=true;_=step(c,o)
+        o.timestamp=5.0;o.manualOverride=false;o.selectedSlot=3;assertRelease(step(c,o))
         o.timestamp=20;assertRelease(step(c,o))
         o.timestamp=35.1;expectTrue(step(c,o).intents.contains(.selectSlot(4)))
         c.features.idleWeapon=false;let(d,other)=quietCarrier();d.features.idleWeapon=false;var q=other;q.timestamp=3
@@ -1649,8 +1651,22 @@ struct AssistantCoreTests {
         var (c,o)=comboFight(["frag_grenade","reverse_impulse_grenade",nil,nil])
         _=step(c,o);o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
         o.timestamp=0.25;_=step(c,o) // The Frag is out.
-        o.timestamp=0.3;o.selectedSlot=2 // You press 2 yourself.
-        expectEqual(step(c,o).reason,"Combo stopped: you changed slots")
+        // You press 2 yourself: the assistant yields while you do, which ends the combo, and it does not pick it up again.
+        o.timestamp=0.28;o.manualOverride=true;expectEqual(step(c,o).reason,"Manual control")
+        o.timestamp=0.3;o.manualOverride=false;o.selectedSlot=2
+        let after=step(c,o);expectFalse(after.reason.hasPrefix("Rev-nade"));expectEqual(thrown(after),nil)
+        // A slot change the game makes by itself is not yours: the combo goes on.
+        var (d,p)=comboFight(["frag_grenade","reverse_impulse_grenade",nil,nil])
+        _=step(d,p);p.timestamp=0.05;p.selectedSlot=3;_=step(d,p)
+        p.timestamp=0.25;_=step(d,p)
+        p.timestamp=0.3;p.selectedSlot=2;expectFalse(step(d,p).reason=="Combo stopped: you changed slots")
+    }
+    @Test func testTheGamesOwnSlotChangeIsNotYourChoice() {
+        // The game may change the selection by itself, say when the last potion of a slot is drunk: the sniper comes back.
+        let(c,base)=quietCarrier();var o=base
+        _=step(c,o);o.timestamp=2.6;expectTrue(step(c,o).intents.contains(.selectSlot(4)))
+        o.timestamp=3.0;o.selectedSlot=4;_=step(c,o)
+        o.timestamp=5.0;o.selectedSlot=3;expectTrue(step(c,o).intents.contains(.selectSlot(4)))
     }
     @Test func testAnSMGFinishesAPullAtYourFeetToo() throws {
         // Your loadout's SMG instead of a shotgun: the opponent behind the door comes to it, and it keeps firing as they land.
@@ -2014,6 +2030,309 @@ struct AssistantCoreTests {
         t.record(track:2,read:.text("speedrun",0.9),roster:roster,time:0);t.record(track:2,read:.text("speedrun",0.9),roster:roster,time:0.5)
         expectEqual(t.name(track:2,time:0.6),nil) // An opponent has no roster name.
         expectEqual(t.name(track:1,time:20),nil) // Nor a tag not read for a long while.
+    }
+
+    // MARK: Opponents out of sight, bullets and carrying the long gun
+    func unseen(_ o:Decision)->Point? { o.intents.compactMap { if case .fireUnseen(let p)=$0 { return p };return nil }.first }
+    /// An AR and an SMG in hand's reach, the AR selected, and a sniper in slot 4 when asked for.
+    func rifleman(sniper:Bool=false)->(Coordinator,Observation) {
+        let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+        var o=observation();o.selectedSlot=3
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"smg:rare",ammo:30,reserveAmmo:90),.init(3,itemID:"ar:epic",ammo:30,reserveAmmo:90),
+                     sniper ? .init(4,itemID:"sniper:rare",ammo:5,reserveAmmo:20) : .init(4,count:0),.init(5,count:0),.init(6,count:0)]
+        return (c,o)
+    }
+    /// An opponent walking right toward the view's edge at 0.15 view widths a second, from x = 0.92 at t = 0 to 0.98 at
+    /// t = 0.4; then it is gone.
+    func walkOut(_ c:Coordinator,_ o:inout Observation) {
+        for i in 0...4 {
+            o.timestamp=Double(i)*0.1
+            let x=0.92+0.015*Double(i)
+            o.players=[.init(id:7,position:.init(x,0.5),velocity:.init(0.15,0),affiliation:.enemy,motion:.init(groundVelocity:.init(0.15,0)))]
+            _=step(c,o)
+        }
+        o.players=[]
+    }
+    @Test func testAnOpponentThatWalksOutOfViewIsFiredAtForABit() {
+        var (c,o)=rifleman();walkOut(c,&o)
+        o.timestamp=0.45;let d=step(c,o)
+        guard let target=unseen(d), let aim=aimed(d) else { Issue.record("no unseen fire: \(d.reason)");return }
+        expectTrue(target.x>1);expectTrue(abs(target.y-0.5)<0.02);expectTrue(aim.isInViewport)
+        expectTrue(d.reason.hasPrefix("Fire at the opponent that went out of view, now to the right"))
+        expectTrue(ActionGuard(profiles:c.profiles).permits(.fireUnseen(target),observation:o,now:o.timestamp,aim:aim))
+        expectEqual(c.memory.entries.map(\.source),[.left])
+        // For a bit: 1.5 s after it was last seen, by default, and then the fight is over.
+        var t=0.45;var fired=0.0
+        while t<2.5 { t+=0.1;o.timestamp=t;if unseen(step(c,o)) != nil { fired=t } }
+        expectTrue(fired>1.7 && fired<2.0)
+        // Off, it is never fired at.
+        var (d2,p)=rifleman();d2.features.unseenFire=false;walkOut(d2,&p);p.timestamp=0.45;expectEqual(unseen(step(d2,p)),nil)
+        _=d2
+    }
+    @Test func testAnOpponentLostInMidViewIsNotFiredAt() {
+        var (c,o)=rifleman()
+        o.players=[.init(id:7,position:.init(0.75,0.5),affiliation:.enemy,motion:.init(groundVelocity:.init(0.15,0)))];_=step(c,o)
+        o.timestamp=0.05;o.players=[];expectEqual(unseen(step(c,o)),nil);expectTrue(c.memory.entries.isEmpty)
+    }
+    @Test func testUnseenFireTakesAMidOrLongRangeGun() {
+        // A fight up close with the SMG; then AR fire from out of view is fired back at with the AR, never a close-range gun.
+        var (c,o)=rifleman();o.selectedSlot=2
+        o.players=[.init(id:7,position:.init(0.6,0.5),affiliation:.enemy,motion:.init(groundVelocity:Point()))]
+        expectTrue(step(c,o).intents.contains(.fire))
+        o.timestamp=0.1;o.players=[];_=step(c,o)
+        o.timestamp=0.2;o.bullets=[round(1,Point(0.3,0.5),Point(1,0),.medium)]
+        let d=step(c,o)
+        expectTrue(d.intents.contains(.selectSlot(3)));expectEqual(d.reason,"Fire back at the AR shooting from the left: select Epic AR")
+        // With only an SMG and a shotgun there is nothing to fire with, and the status says so.
+        let e=Coordinator(catalog:.standard);e.features.idleWeapon=false
+        var p=observation();p.selectedSlot=2
+        p.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"smg:rare",ammo:30,reserveAmmo:90),.init(3,itemID:"shotgun:rare",ammo:5,reserveAmmo:20),
+                     .init(4,count:0),.init(5,count:0),.init(6,count:0)]
+        walkOut(e,&p);p.timestamp=0.45;let f=step(e,p)
+        expectEqual(unseen(f),nil);expectTrue(f.reason.hasSuffix("no mid- or long-range gun reaches"))
+        // The guard refuses unseen fire with a close-range gun too.
+        expectFalse(ActionGuard(profiles:e.profiles).permits(.fireUnseen(Point(1.2,0.5)),observation:p,now:p.timestamp,aim:Point(0.7,0.5)))
+    }
+    @Test func testAnOpponentSeenAgainIsFoughtInView() {
+        var (c,o)=rifleman();walkOut(c,&o)
+        o.timestamp=0.45;expectTrue(unseen(step(c,o)) != nil)
+        // It steps back into view under a new track: plain fire again, and nothing remembered.
+        o.timestamp=0.55;o.players=[.init(id:12,position:.init(0.96,0.5),affiliation:.enemy,motion:.init(groundVelocity:Point()))]
+        let d=step(c,o);expectTrue(d.intents.contains(.fire));expectTrue(c.memory.entries.isEmpty)
+    }
+    @Test func testRememberedOpponentsMoveWithTheView() {
+        var (c,o)=rifleman();walkOut(c,&o)
+        o.timestamp=0.45;_=step(c,o)
+        let before=c.memory.entries[0].position
+        // You walk right: the scenery, and the opponent with it, shifts left on screen.
+        o.timestamp=0.5;o.sceneryShift=Point(-0.05,0);_=step(c,o)
+        let after=c.memory.entries[0].position
+        expectTrue(after.x < before.x-0.04)
+        // The sniper's zoom-out brings it closer to you on screen.
+        let (d,p0)=rifleman(sniper:true);var p=p0;walkOut(d,&p)
+        p.timestamp=0.45;_=step(d,p);let wide=d.memory.entries[0].position
+        p.timestamp=0.5;p.selectedSlot=4;_=step(d,p)
+        let zoomed=d.memory.entries[0].position
+        expectTrue(zoomed.x-0.5 < (wide.x-0.5)/1.15)
+    }
+    @Test func testARememberedOpponentNotThereOnceBackInViewIsForgotten() {
+        var (c,o)=rifleman();walkOut(c,&o)
+        o.timestamp=0.45;_=step(c,o);expectEqual(c.memory.entries.count,1)
+        // You chase it to the right: where it is predicted comes back into plain view, and nobody is there.
+        var t=0.45
+        while t<1.2 { t+=0.05;o.timestamp=t;o.sceneryShift=Point(-0.02,0);_=step(c,o) }
+        expectEqual(c.memory.entries.count,1) // In plain view since about 0.7 s: not yet given up.
+        while t<1.5 { t+=0.05;o.timestamp=t;_=step(c,o) }
+        expectTrue(c.memory.entries.isEmpty)
+    }
+    @Test func testAWallInViewStopsUnseenFire() {
+        var (c,o)=rifleman();walkOut(c,&o)
+        o.timestamp=0.45;o.obstacles=[.init(.wall,bounds:.init(0.8,0.3,0.03,0.4))]
+        let d=step(c,o);expectEqual(unseen(d),nil);expectTrue(d.reason.hasSuffix("the way is blocked"))
+        expectFalse(ActionGuard(profiles:c.profiles).permits(.fireUnseen(Point(1.1,0.5)),observation:o,now:o.timestamp,aim:Point(0.7,0.5)))
+    }
+    @Test func testTheGuardChecksUnseenFire() {
+        let (c,base)=rifleman();var o=base;let g=ActionGuard(profiles:c.profiles)
+        expectTrue(g.permits(.fireUnseen(Point(1.2,0.5)),observation:o,now:0,aim:Point(0.7,0.5)))
+        expectFalse(g.permits(.fireUnseen(Point(1.2,0.5)),observation:o,now:0,aim:Point(0.5,0.3))) // Aimed another way.
+        expectFalse(g.permits(.fireUnseen(Point(1.2,0.5)),observation:o,now:0,aim:nil))
+        o.players=[.init(id:2,position:.init(0.85,0.5),affiliation:.teammate)]
+        expectFalse(g.permits(.fireUnseen(Point(1.2,0.5)),observation:o,now:0,aim:Point(0.7,0.5))) // A teammate on the way.
+        // A shooter estimated in view, hidden in a bush: the round flies on past it, so a player beyond it blocks too.
+        o.players=[.init(id:2,position:.init(0.9,0.5),affiliation:.unknown)]
+        expectFalse(g.permits(.fireUnseen(Point(0.75,0.5)),observation:o,now:0,aim:Point(0.7,0.5)))
+        o.obstacles=[.init(.wall,bounds:.init(0.85,0.3,0.03,0.4))];o.players=[]
+        expectTrue(g.permits(.fireUnseen(Point(0.75,0.5)),observation:o,now:0,aim:Point(0.7,0.5))) // A wall beyond it does not.
+        o.obstacles=[];o.inventory[2].ammo=0
+        expectFalse(g.permits(.fireUnseen(Point(1.2,0.5)),observation:o,now:0,aim:Point(0.7,0.5)))
+    }
+
+    /// A confirmed round at `position`, flying along `direction` (screen-proportioned; normalized here).
+    func round(_ id:Int,_ position:Point,_ direction:Point,_ ammo:AmmoFamily?,aspect:Double=16.0/9.0)->Bullet {
+        let d=Point(direction.x,direction.y/aspect);return Bullet(id:id,position:position,direction:d*(1/d.length),ammo:ammo,speed:1.1,frames:3)
+    }
+    @Test func testASniperRoundFromAboveIsFiredBack() {
+        let (c,base)=rifleman(sniper:true);var o=base
+        _=step(c,o)
+        o.timestamp=0.1;o.bullets=[round(1,Point(0.5,0.2),Point(0,1),.large)]
+        let d=step(c,o)
+        // No fight before, but a sniper's round is always fired back at: far away, so with the sniper.
+        expectTrue(d.intents.contains(.selectSlot(4)));expectTrue(d.reason.hasPrefix("Fire back at the sniper shooting from above"))
+        let shooter=c.memory.entries[0].position;expectTrue(shooter.y<0);expectTrue(abs(shooter.x-0.5)<0.01)
+        o.timestamp=0.5;o.selectedSlot=4;o.bullets=[]
+        let e=step(c,o)
+        guard let target=unseen(e), let aim=aimed(e) else { Issue.record("no return fire: \(e.reason)");return }
+        expectTrue(target.y<0);expectTrue(aim.y<0.5);expectTrue(abs(aim.x-0.5)<0.01)
+        expectTrue(ActionGuard(profiles:c.profiles).permits(.fireUnseen(target),observation:o,now:o.timestamp,aim:aim))
+        // The sniper fires once a reload, keeping its aim meanwhile; 1.5 s after the last round, it stops.
+        o.timestamp=0.6;let wait=step(c,o);expectEqual(wait.reason,"Weapon cooldown");expectTrue((aimed(wait)?.y ?? 1)<0.5)
+        o.timestamp=1.0;_=step(c,o);o.timestamp=1.4;_=step(c,o)
+        o.timestamp=1.65;expectEqual(step(c,o).reason,"Observing")
+    }
+    @Test func testARoundsFromOutOfViewAreFiredBackOnlyInAFight() {
+        // AR fire with no fight lately: not fired back at, and the status says why.
+        var (c,o)=rifleman();_=step(c,o)
+        o.timestamp=0.1;o.bullets=[round(1,Point(0.3,0.5),Point(1,0),.medium)]
+        let d=step(c,o);expectEqual(unseen(d),nil);expectEqual(d.reason,"AR fire from the left, and no fight lately: not firing back")
+        // Right after a fight it is.
+        var (e,p)=rifleman()
+        p.players=[.init(id:7,position:.init(0.75,0.5),affiliation:.enemy,motion:.init(groundVelocity:Point()))]
+        expectTrue(step(e,p).intents.contains(.fire))
+        p.timestamp=0.1;p.players=[];_=step(e,p)
+        p.timestamp=0.2;p.bullets=[round(1,Point(0.3,0.5),Point(1,0),.medium)]
+        let f=step(e,p)
+        guard let target=unseen(f) else { Issue.record("no return fire: \(f.reason)");return }
+        expectTrue(target.x<0.3);expectTrue(f.reason.hasPrefix("Fire back at the AR shooting from the left"))
+        // A round flying at you delays the next heal.
+        p.timestamp=0.3;p.bullets=[];p.health=40
+        expectEqual(e.memory.lastIncoming,0.2)
+    }
+    @Test func testInDuoRoundsAreFiredBackAtOnlyOnceTheyHitYou() {
+        // A sniper's round from above in Duo: it may be a teammate's the detector does not see, so not until you are hit.
+        var (c,o)=rifleman(sniper:true);o.mode = .duo;o.teamMode=true;_=step(c,o)
+        o.timestamp=0.1;o.bullets=[round(1,Point(0.5,0.2),Point(0,1),.large)]
+        let d=step(c,o);expectEqual(unseen(d),nil);expectFalse(d.intents.contains(.selectSlot(4)))
+        expectEqual(d.reason,"Sniper fire from above, but no hit taken: maybe a teammate's; not firing back")
+        // Hit: it is an opponent's.
+        o.timestamp=0.2;o.bullets=[];o.shield=60
+        expectTrue(step(c,o).reason.hasPrefix("Fire back at the sniper shooting from above"))
+    }
+    @Test func testUnseenFireIsNeverAimedAtATeammateOrAnUnknownPlayer() {
+        var (c,o)=rifleman();walkOut(c,&o)
+        // An unknown player shows up where the opponent that walked out is estimated, just inside the view.
+        o.timestamp=0.45;o.players=[.init(id:30,position:.init(0.985,0.5),affiliation:.unknown,confirmed:false)]
+        expectEqual(unseen(step(c,o)),nil)
+    }
+    @Test func testRoundsNotFiredAtYouOrFiredByPlayersInViewLocateNobody() {
+        var (c,o)=rifleman();_=step(c,o)
+        // Your own round, flying away from you.
+        o.timestamp=0.1;o.bullets=[round(1,Point(0.6,0.5),Point(1,0),.large)];_=step(c,o)
+        // A round passing well wide of you.
+        o.timestamp=0.2;o.bullets=[round(2,Point(0.3,0.2),Point(1,0),.large)];_=step(c,o)
+        expectTrue(c.memory.entries.isEmpty);expectEqual(c.memory.lastIncoming,-Double.infinity)
+        // A teammate's round: it came from the teammate in view.
+        o.teamMode=true;o.mode = .duo
+        o.players=[.init(id:3,position:.init(0.2,0.5),affiliation:.teammate)]
+        o.timestamp=0.3;o.bullets=[round(3,Point(0.3,0.5),Point(1,0),.large)];_=step(c,o)
+        expectTrue(c.memory.entries.isEmpty)
+        // In Duo, a round flying past you at an opponent in view is your teammate's, though the teammate is out of view.
+        o.players=[.init(id:4,position:.init(0.8,0.5),affiliation:.enemy,motion:.init(groundVelocity:Point()))]
+        o.timestamp=0.4;o.bullets=[round(4,Point(0.3,0.5),Point(1,0),.large)];_=step(c,o)
+        expectTrue(c.memory.entries.isEmpty)
+        // An opponent in view shooting at you is a fight: rounds of others are then fired back at.
+        o.players=[.init(id:5,position:.init(0.2,0.5),affiliation:.enemy,motion:.init(groundVelocity:Point()))]
+        o.timestamp=0.5;o.bullets=[round(5,Point(0.3,0.5),Point(1,0),.medium)];_=step(c,o)
+        expectEqual(c.memory.lastShotFromView,0.5);expectTrue(c.memory.entries.isEmpty)
+    }
+    @Test func testRoundsFromNewAnglesLocateTheShooter() {
+        // A shooter above and to the right, out of view, stays put while you walk right under it.
+        let aspect=16.0/9.0
+        var memory=EnemyMemory();var o=observation();let s=CombatSettings()
+        var shooter=Point(0.8,0.5-0.45*aspect) // On screen as the view stands at first.
+        func fire(_ id:Int)->Bullet {
+            let me=Point(0.5,0.5);let d=Point(me.x-shooter.x,(me.y-shooter.y)/aspect);let u=d*(1/d.length)
+            return Bullet(id:id,position:Point(shooter.x+u.x*0.35,shooter.y+u.y*0.35*aspect),direction:u,ammo:.large,speed:1.1,frames:3)
+        }
+        o.bullets=[fire(1)];memory.update(o,zoom:1,settings:s)
+        for i in 1...3 { o.timestamp=Double(i)*0.1;o.sceneryShift=Point(-0.1,0);shooter.x-=0.1;o.bullets=[];memory.update(o,zoom:1,settings:s) }
+        o.timestamp=0.4;o.sceneryShift=Point();o.bullets=[fire(2)];memory.update(o,zoom:1,settings:s)
+        expectEqual(memory.entries.count,1)
+        let e=memory.entries[0];let miss=Point(e.position.x-shooter.x,(e.position.y-shooter.y)/aspect).length
+        expectTrue(miss<0.05);expectEqual(e.bullets,2)
+    }
+
+    @Test func testBulletTrackerFollowsARoundAndMeasuresItsSpeed() {
+        var tracker=BulletTracker();let aspect=16.0/9.0
+        // 1.1 view widths a second to the right, seen at 55 frames a second while you walk left (the scenery shifts right).
+        let shift=Point(0.002,0);var x=0.3;var bullets:[Bullet]=[]
+        for i in 0..<3 {
+            let t=Double(i)/55
+            bullets=tracker.update(time:t,aspect:aspect,sceneryShift:i==0 ? nil : shift,ownVelocity:nil,
+                                   sightings:[BulletSighting(position:Point(x,0.4),direction:Point(1,0),oriented:i>0)])
+            x+=1.1/55+shift.x
+        }
+        expectEqual(bullets.count,1);expectEqual(bullets[0].frames,3);expectTrue(bullets[0].confirmed)
+        expectTrue(abs((bullets[0].speed ?? 0)-1.1)<0.05);expectTrue(bullets[0].direction.x>0.99)
+        // A round seen without its trail is oriented by its motion: here it flies left.
+        var t2=BulletTracker();var left:[Bullet]=[]
+        for i in 0..<3 {
+            left=t2.update(time:Double(i)*0.02,aspect:aspect,sceneryShift:i==0 ? nil : Point(),ownVelocity:nil,
+                           sightings:[BulletSighting(position:Point(0.6-0.022*Double(i),0.4),direction:Point(1,0),oriented:false)])
+        }
+        expectEqual(left.count,1);expectTrue(left[0].direction.x < -0.99);expectTrue(left[0].confirmed)
+        // Something drifting at a walking pace is no round.
+        var t3=BulletTracker();var slow:[Bullet]=[]
+        for i in 0..<4 {
+            slow=t3.update(time:Double(i)*0.02,aspect:aspect,sceneryShift:i==0 ? nil : Point(),ownVelocity:nil,
+                           sightings:[BulletSighting(position:Point(0.6+0.0036*Double(i),0.4),direction:Point(1,0),oriented:true)])
+        }
+        expectFalse(slow.first?.confirmed ?? false)
+        // Nor are look-alikes that line up off the round's axis.
+        var t5=BulletTracker();var off:[Bullet]=[]
+        for i in 0..<3 {
+            off=t5.update(time:Double(i)*0.02,aspect:aspect,sceneryShift:i==0 ? nil : Point(),ownVelocity:nil,
+                          sightings:[BulletSighting(position:Point(0.6+0.012*Double(i),0.4+0.03*Double(i)),direction:Point(1,0),oriented:true)])
+        }
+        expectFalse(off.contains(where:\.confirmed))
+        // Two rounds of a burst, one behind the other, stay apart.
+        var t4=BulletTracker()
+        let burst=[BulletSighting(position:Point(0.30,0.4),direction:Point(1,0),oriented:true),BulletSighting(position:Point(0.36,0.4),direction:Point(1,0),oriented:true)]
+        let first=t4.update(time:0,aspect:aspect,sceneryShift:nil,ownVelocity:nil,sightings:burst)
+        _=t4.update(time:0.02,aspect:aspect,sceneryShift:Point(),ownVelocity:nil,sightings:burst.map { var b=$0;b.position.x+=0.022;return b })
+        let next=t4.update(time:0.04,aspect:aspect,sceneryShift:Point(),ownVelocity:nil,sightings:burst.map { var b=$0;b.position.x+=0.044;return b })
+        expectEqual(Set(next.map(\.id)),Set(first.map(\.id)));expectTrue(next.allSatisfy(\.confirmed))
+    }
+
+    @Test func testBowsAreCarriedAndFoughtWithAtLongRange() {
+        let c=Coordinator(catalog:.standard);var o=observation();o.selectedSlot=2
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"smg:rare",ammo:30,reserveAmmo:90),.init(3,itemID:"special:mythic:xbow",ammo:1,reserveAmmo:10),
+                     .init(4,count:0),.init(5,count:0),.init(6,count:0)]
+        _=step(c,o);o.timestamp=1.6
+        let d=step(c,o);expectTrue(d.intents.contains(.selectSlot(3)));expectEqual(d.reason,"Carry Mythic XBow while nothing is happening")
+        // A sniper still comes first.
+        o.inventory[3] = .init(4,itemID:"sniper:rare",ammo:5,reserveAmmo:20)
+        let e=Coordinator(catalog:.standard);var p=o;p.timestamp=0;_=step(e,p);p.timestamp=1.6
+        expectTrue(step(e,p).intents.contains(.selectSlot(4)))
+        // At long range the bow fires, and the guard lets it.
+        let f=Coordinator(catalog:.standard);f.features.idleWeapon=false
+        var q=observation();q.aspect=1;q.selectedSlot=3;q.inventory=o.inventory;q.inventory[3] = .init(4,count:0)
+        q.players=[.init(id:1,position:.init(0.88,0.5),affiliation:.enemy,motion:.init(groundVelocity:Point()))]
+        let g=step(f,q);expectTrue(g.intents.contains(.fire))
+        expectTrue(ActionGuard(profiles:f.profiles).permits(.fire,observation:q,now:0,aim:aimed(g)))
+        // It is still never picked up.
+        expectFalse(Policy.reachesFar(f.profiles["special:epic:healing_gun"]!))
+    }
+    @Test func testCloseQuartersCarryTheCloseRangeGun() {
+        let(c,base)=quietCarrier();var o=base;o.selectedSlot=4
+        // Walls all around you, as inside a house.
+        o.obstacles=[.init(.wall,bounds:.init(0.40,0.30,0.02,0.40)),.init(.wall,bounds:.init(0.58,0.30,0.02,0.40)),
+                     .init(.wall,bounds:.init(0.40,0.30,0.20,0.03)),.init(.door,bounds:.init(0.40,0.67,0.20,0.03))]
+        expectTrue(Policy.closeQuarters(o))
+        _=step(c,o);o.timestamp=1.6
+        let d=step(c,o);expectTrue(d.intents.contains(.selectSlot(2)));expectEqual(d.reason,"Carry Rare SHOTGUN in close quarters")
+        // Out in the open again, the sniper comes back once close quarters are behind you.
+        o.timestamp=2.0;o.selectedSlot=2;o.obstacles=[];_=step(c,o)
+        o.timestamp=3.0;assertRelease(step(c,o))
+        o.timestamp=3.7;expectTrue(step(c,o).intents.contains(.selectSlot(4)))
+        // One wall beside you is no house.
+        var p=base;p.obstacles=[.init(.wall,bounds:.init(0.58,0.30,0.02,0.40))];expectFalse(Policy.closeQuarters(p))
+    }
+    @Test func testARoundFlyingAtYouDelaysTheNextHeal() {
+        let c=engine();var o=observation();o.health=40;o.inventory[2] = .init(3,itemID:"med",count:1)
+        _=step(c,o)
+        o.timestamp=1.9;o.bullets=[round(1,Point(0.3,0.5),Point(1,0),.medium)];_=step(c,o)
+        o.bullets=[];o.timestamp=2.1;expectFalse(step(c,o).intents.contains(.selectSlot(3)))
+        o.timestamp=2.5;expectFalse(step(c,o).intents.contains(.selectSlot(3)))
+        o.timestamp=3.0;expectFalse(step(c,o).intents.contains(.selectSlot(3)))
+        o.timestamp=3.5;_=step(c,o);o.timestamp=3.95;expectTrue(step(c,o).intents.contains(.selectSlot(3)))
+    }
+    @Test func testVisiblePartOfALineEndsAtTheViewsEdge() {
+        var o=observation()
+        let edge=Policy.visiblePart(toward:Point(1.5,0.5),in:o);expectTrue(abs(edge.x-0.999)<1e-9);expectTrue(abs(edge.y-0.5)<1e-9)
+        let corner=Policy.visiblePart(toward:Point(1.0,-1.0),in:o);expectTrue(corner.isInViewport);expectTrue(abs(corner.y-0.001)<1e-9)
+        expectEqual(Policy.visiblePart(toward:Point(0.7,0.4),in:o),Point(0.7,0.4))
+        o.obstacles=[.init(.tree,bounds:.init(0.8,0.4,0.05,0.2))];expectTrue(Policy.canFireUnseen(o,toward:Point(1.5,0.5)))
+        o.obstacles=[.init(.door,bounds:.init(0.8,0.4,0.05,0.2))];expectFalse(Policy.canFireUnseen(o,toward:Point(1.5,0.5)))
     }
 }
 

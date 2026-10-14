@@ -70,11 +70,11 @@ final class InputDriver {
                     self.clickEnds = nil
                     if self.mouseHeld { self.post(CGEvent(mouseEventSource: self.source, mouseType: .leftMouseUp, mouseCursorPosition: CGEvent(source:nil)?.location ?? .zero, mouseButton: .left)); self.mouseHeld = false }
                 }
-            case .fire, .fireAtPull, .fireHealing, .useConsumable:
+            case .fire, .fireAtPull, .fireHealing, .fireUnseen, .useConsumable:
                 guard !mouseHeld else { break }
                 // Press only inside the aim circle, never where the cursor was left: a press on the window's edge resizes
-                // or drags the window. A shot goes along the aim (a bounced Healing Gun round square to the wall, as the
-                // circle keeps the aim's angle); a consumable does not care where you click.
+                // or drags the window. A shot goes along the aim (a bounced Healing Gun round square to the wall, or a shot at an
+                // opponent beyond the view's edge, as the circle keeps the aim's angle); a consumable does not care where you click.
                 let press: Point
                 if intent != .useConsumable, let aim { press = Targeting.cursor(toward: aim, from: o.player, aspect: o.aspect, radius: settings.aimRadius, avoiding: o.hudAreas).point }
                 else if let here = CGEvent(source: nil).map({ viewport($0.location, bounds, content) }), insideCircle(here, o) { press = here }

@@ -34,6 +34,8 @@ struct FrameReport {
     var healCircle: (seconds: Double, inside: Bool)?
     /// The grenade circle's radius in view heights, drawn on the preview.
     var throwRadius: Double
+    /// Opponents out of sight the assistant remembers, drawn on the preview.
+    var unseen: [EnemyMemory.Entry] = []
 }
 
 final class ProcessingPipeline {
@@ -97,7 +99,7 @@ final class ProcessingPipeline {
                                  windowBounds:frame.windowBounds,contentRect:frame.contentRect,
                                  hudMilliseconds:result.hudMilliseconds,detectorMilliseconds:result.detectorMilliseconds,healing:coordinator.healingItem,
                                  grenade:coordinator.liveGrenade.map { ($0.name,max(0,$0.explodes-now)) },healCircle:coordinator.healCircle,
-                                 throwRadius:coordinator.settings.throwRadius))
+                                 throwRadius:coordinator.settings.throwRadius,unseen:coordinator.memory.entries))
         }
     }
 }

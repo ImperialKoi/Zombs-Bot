@@ -56,6 +56,13 @@ struct CalibrationEditor:View {
                     }
                     Text("Grenades land where you click, so Reverse Impulses and grenades are thrown within this share of the view's height from your character. At the far right they may land anywhere on screen, except near its edges. The inventory, buttons, minimap, vitals and the item panel are never clicked.")
                         .font(.caption).foregroundStyle(.secondary)
+                    Slider(value:$draft.combat.unseenFireFor,in:0...4,step:0.5) { Text(String(format:"Fire out of view %.1f s",draft.combat.unseenFireFor)).frame(width:170,alignment:.leading) }
+                    Text("After an opponent walks out of view, the assistant keeps firing this long where its course takes it, with a mid- or long-range gun or a bow.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Slider(value:$draft.combat.returnFireFor,in:0...4,step:0.5) { Text(String(format:"Fire back %.1f s",draft.combat.returnFireFor)).frame(width:170,alignment:.leading) }
+                    Slider(value:$draft.combat.recentFight,in:0...30,step:1) { Text(String(format:"Recent fight %.0f s",draft.combat.recentFight)).frame(width:170,alignment:.leading) }
+                    Text("A round flying at you from out of view is fired back at, back along its path, for the Fire back time: a sniper's always, an AR's, SMG's or shotgun's only within the Recent fight time of a fight. In Duo and Squad, only once a round has hit you, as your teammates' rounds look alike.")
+                        .font(.caption).foregroundStyle(.secondary)
                     Slider(value:$draft.combat.lowHealth,in:20...80,step:5) { Text(String(format:"Low health %.0f",draft.combat.lowHealth)).frame(width:170,alignment:.leading) }
                     Text("Below this health a Healing Grenade or the Healing Gun heals you or a teammate, and a potion that helps is picked up and drunk before other loot (also below twice this in health and shield together).")
                         .font(.caption).foregroundStyle(.secondary)

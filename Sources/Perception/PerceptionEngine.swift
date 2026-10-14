@@ -27,7 +27,14 @@ public struct PerceptionResult {
     public var detectorMilliseconds: Double
     /// The frame as the detector saw it, when it ran on this frame; a cheap source for previews.
     public var detectorInput: ModelInput?
+    /// Rounds this frame shows, before tracking (`Observation.bullets` holds the tracked ones).
+    public var bulletSightings: [BulletSighting] = []
+    /// Time the search for rounds took, on its own core.
+    public var bulletMilliseconds = 0.0
 }
+
+/// The rounds found on another thread, handed back once it is done.
+private final class BulletScan: @unchecked Sendable { var sightings: [BulletSighting] = []; var milliseconds = 0.0 }
 
 /// Turns one viewport frame into an observation. HUD values come from pixels; text is read
 /// asynchronously and used only while it still matches the pixels on screen.
@@ -39,6 +46,8 @@ public final class PerceptionEngine {
     public var settings: PerceptionSettings
     public private(set) var layout: HUDLayout?
     private let tracker = SceneTracker()
+    private let bulletDetector = BulletDetector()
+    private var bulletTracker = BulletTracker()
     private var affiliation = AffiliationTracker()
     private var lastLayoutSearch = -Double.infinity
     private var lastAlive = -Double.infinity
@@ -67,7 +76,7 @@ public final class PerceptionEngine {
     }
 
     public func reset() {
-        tracker.reset(); affiliation.reset(); inventory.reset(); text.reset()
+        tracker.reset(); bulletTracker.reset(); affiliation.reset(); inventory.reset(); text.reset()
         promptPanel = nil; lastTagRead = [:]; lastTagRequest = [:]; roster = []; rosterNames = [:]; rosterDownAt = [:]; rosterSince = nil
     }
 
@@ -203,17 +212,31 @@ public final class PerceptionEngine {
         // Scene objects.
         let detectStart = ProcessInfo.processInfo.systemUptime
         var detections: [Detection] = []
-        if let detector, let ciImage, alive {
-            do {
-                let exclusions = layout.exclusions(rosterRows: hud.rosterRows, prompt: hud.promptRect).map(layout.normalized)
-                let raw = try detector.predict(ciImage).filter { d in !exclusions.contains { $0.contains(d.bounds.center) } }
-                result.detectorInput = detector.lastInput
-                detections = tracker.update(Self.mergingDuplicatePlayers(Self.excludingYourself(raw, aspect: o.aspect)), at: t, aspect: o.aspect)
-                o.sceneryShift = tracker.shift; o.ownVelocity = tracker.ownVelocity
-            } catch {
-                o.captureHealthy = false; result.problems.append(error.localizedDescription)
+        if alive {
+            let hudPixels = layout.exclusions(rosterRows: hud.rosterRows, prompt: hud.promptRect)
+            // Rounds in flight are looked for on another core while the detector runs on the Neural Engine.
+            let rounds = BulletScan()
+            let group = DispatchGroup()
+            DispatchQueue.global(qos: .userInteractive).async(group: group) { [bulletDetector] in
+                let start = ProcessInfo.processInfo.systemUptime
+                rounds.sightings = bulletDetector.detect(image, excluding: hudPixels)
+                rounds.milliseconds = (ProcessInfo.processInfo.systemUptime - start) * 1000
             }
-        }
+            if let detector, let ciImage {
+                do {
+                    let exclusions = hudPixels.map(layout.normalized)
+                    let raw = try detector.predict(ciImage).filter { d in !exclusions.contains { $0.contains(d.bounds.center) } }
+                    result.detectorInput = detector.lastInput
+                    detections = tracker.update(Self.mergingDuplicatePlayers(Self.excludingYourself(raw, aspect: o.aspect)), at: t, aspect: o.aspect)
+                    o.sceneryShift = tracker.shift; o.ownVelocity = tracker.ownVelocity
+                } catch {
+                    o.captureHealthy = false; result.problems.append(error.localizedDescription)
+                }
+            }
+            group.wait()
+            result.bulletSightings = rounds.sightings; result.bulletMilliseconds = rounds.milliseconds
+            o.bullets = bulletTracker.update(time: t, aspect: o.aspect, sceneryShift: o.sceneryShift, ownVelocity: o.ownVelocity, sightings: rounds.sightings)
+        } else { bulletTracker.reset() }
         result.detectorMilliseconds = (ProcessInfo.processInfo.systemUptime - detectStart) * 1000
         for d in detections {
             switch d.label {

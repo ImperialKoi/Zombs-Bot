@@ -2,6 +2,71 @@
 
 Updated October 14, 2026 on this Apple silicon Mac (8 GB M1).
 
+## Opponents out of view, bullets, and the gun carried, October 14
+
+You asked for three things:
+- After an opponent leaves the screen, keep shooting for a bit where it is predicted, with a mid- or long-range gun.
+- Always walk around with a sniper, an X-bow or another long-range gun, except in close quarters such as a house.
+- Track bullets to estimate where the shooter is and where it is heading. Fire back at a sniper's round. Fire back at AR or SMG rounds only right after a fight.
+
+This was checked offline only.
+
+**Changes:**
+- **Opponents out of view** (`EnemyMemory`). An opponent last seen at the view's edge, or predicted beyond it, is remembered as a Kalman filter. Its velocity fades like the aim's lead, and the filter follows your movement and the sniper's zoom.
+  - For 1.5 s it is fired at where its course takes it, with a mid- or long-range gun or a bow, through a new `fireUnseen` intent.
+  - The input guard allows that intent only with such a gun, aimed the same way. No wall, door or chest may stand before the opponent's estimated position. No teammate or unknown player may stand anywhere on the line to the view's edge, since the round flies on past where the opponent is estimated.
+  - It stops once the opponent is seen again, or would be in plain view and is not there. An opponent lost mid-view is not chased.
+- **Bullets** (`BulletDetector`, `BulletTracker`).
+  - Rounds are found by their outline, their ammunition's colors and their trail. They count once seen in three frames, moving along their axis at 0.75 to 1.6 view widths a second.
+  - A round flying at you, not fired by any player in view, says its shooter stands back along its path. Rounds from several angles locate the shooter.
+  - A sniper's round is fired back at for 1.5 s; an AR's, SMG's or shotgun's only within 10 s of a fight.
+  - In Duo and Squad, only after a hit: your teammates' rounds look alike, and the pilot detector does not always see the teammate who fired.
+  - A round flying at you delays the next heal by 2 s.
+- **The gun carried.**
+  - Bows count as long-range guns, below snipers. They are carried and fired at long range, and still never picked up.
+  - In close quarters, with walls or doors within 0.12 view widths on 4 of 8 sides, the close-range gun is carried, for 1.5 s after you leave them.
+  - The waits are now 1.5 s of quiet (2.5 before) and 4 s after a fight (8 before).
+  - A slot change counts as yours only within 2 s of a key, button or scroll of yours. Before, any change the assistant had not asked for kept the sniper away for 30 s, including one the game makes itself.
+
+**Measurements:**
+- **Round sprites match the ammunition icons.** On recordings:
+  - small: cream tip on a gray case;
+  - medium: orange tip on a blue case;
+  - large: cream tip, green band and brown case;
+  - shells: red.
+  Rounds are 0.006 to 0.011 view widths long, with a pale trail up to about 0.15 view widths long.
+- **Single frames.** Over 438 frames sampled across all 33 matches, 77 candidates had a trail. 72 were rounds; the other 5 were orange name text and shells on the ground, which never move like rounds.
+- **A 30 fps Duo clip** (212F9A, 560 frames around a fight; the video was deleted after extraction):
+  - 97 confirmed rounds.
+  - Unseen fire at opponents that walked out at the top, bottom and right edges.
+  - Return fire only at a minigun shooter below you, out of view, whose rounds were hitting you (the kill feed shows them knocking you down).
+  - Before the Duo hit rule was added, your teammate's SMG rounds were fired back at; now they are not.
+- **Solo match 78E1A3** (1,377 frames at 5 fps): 4 confirmed rounds, all real (an AR round, two sniper rounds, an SMG round). The assistant fired back to the right at a sniper round coming at you from out of view.
+- **Search time** for rounds, on its own core while the detector runs on the Neural Engine: 5.2 ms median and 9.2 ms p95 at 3,840 pixels wide; 3.7 ms median at 2,880.
+- **Close quarters** on two Solo matches: 76 of 1,603 frames flagged.
+  - Of 12 flagged frames checked by eye, 10 were inside houses or rooms; 2 were outdoors next to a plane wreck and a pod.
+  - None of 7 outdoor frames next to walls was flagged.
+  - Very large halls do not count.
+
+**Tests.** 204 Swift tests pass. New tests cover:
+- unseen fire for 1.5 s, and only with mid- or long-range guns;
+- opponents followed through movement and zoom, and seen again;
+- walls, teammates and unknown players blocking unseen fire, including a player beyond an opponent estimated in view;
+- forgetting an opponent predicted back in plain view and not there;
+- a sniper's round from above fired back at with the sniper;
+- AR fire returned only after a fight;
+- rounds that locate nobody (your own, a teammate's, or ones flying at an opponent in view);
+- triangulation from two angles;
+- the tracker (speed, direction from motion, look-alikes, bursts);
+- bows, close quarters, the heal delay, and the Duo hit rule;
+- the detector on real crops: a sniper round over grass, AR and SMG rounds on snow, and a burst on purple ground.
+
+**Unverified live:**
+- whether unseen fire for 1.5 s is the right "bit";
+- how often the detector misses rounds on busy ground (only rounds with all of their outline and fill on screen are found);
+- the ranges assumed for each kind of round;
+- close quarters in maps and buildings not checked here.
+
 ## Tier C guns, rarity first, and heals first below full, October 14
 
 You asked for three things:

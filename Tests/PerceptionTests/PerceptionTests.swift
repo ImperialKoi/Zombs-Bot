@@ -43,6 +43,39 @@ private func read(_ name: String) throws -> HUDSnapshot {
 }
 
 struct PerceptionTests {
+    // MARK: Rounds in flight
+    /// The sighting within 12 pixels of (`x`, `y`) on a frame `width` × `height`.
+    private func sighting(_ found: [BulletSighting], _ x: Double, _ y: Double, _ width: Double, _ height: Double) -> BulletSighting? {
+        found.first { abs($0.position.x * width - x) < 12 && abs($0.position.y * height - y) < 12 }
+    }
+    @Test func testRoundsAreFoundWithTheirAmmunitionAndWayOfFlight() throws {
+        let detector = BulletDetector()
+        // An opponent's sniper round flying left at you over grass; its trail fades out behind it, to the right.
+        let large = detector.detect(try frame("rounds-large"))
+        let sniper = try #require(sighting(large, 3397, 795, 3840, 1736))
+        #expect(sniper.ammo == .large); #expect(sniper.oriented); #expect(sniper.direction.x < -0.95)
+        #expect((sniper.tail?.x ?? 0) * 3840 > 3440)
+        #expect(large.count == 1)
+        // On snow: your AR round flying right, and an SMG round flying left.
+        let snow = detector.detect(try frame("rounds-snow"))
+        let ar = try #require(sighting(snow, 2846, 989, 3840, 1736))
+        #expect(ar.ammo == .medium); #expect(ar.direction.x > 0.9)
+        let smg = try #require(sighting(snow, 2251, 1149, 3840, 1736))
+        #expect(smg.ammo == .small); #expect(smg.direction.x < -0.9)
+        // Three SMG rounds of a burst flying up, a little to the left, on a recording 2,880 pixels wide, each with its trail.
+        let clip = detector.detect(try frame("rounds-clip"))
+        for (x, y) in [(814.0, 290.0), (1026.0, 395.0), (1251.0, 522.0)] {
+            let round = try #require(sighting(clip, x, y, 2880, 1376))
+            #expect(round.ammo == .small); #expect(round.direction.x < 0 && round.direction.y < -0.8); #expect(round.tail != nil)
+        }
+    }
+    @Test func testRoundsAreNotFoundOnTheHUDOrPlainGround() throws {
+        let detector = BulletDetector()
+        let image = try frame("rounds-large")
+        #expect(detector.detect(image, excluding: [PixelRect(3300, 700, 300, 200)]).isEmpty)
+        #expect(detector.detect(try frame("a-010611")).allSatisfy { $0.ammo != nil })
+    }
+
     @Test func testFindsTheHUDAtBothRecordedResolutions() throws {
         let solo = try #require(HUDLayout.detect(in: try frame("a-010611")))
         #expect(abs(solo.unit - 142) <= 2)

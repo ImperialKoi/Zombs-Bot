@@ -250,6 +250,31 @@ public struct Obstacle: Codable, Equatable, Sendable {
     public var preventsEngagement: Bool { kind != .tree && kind != .rock }
 }
 
+/// A bullet in flight, as `BulletTracker` follows it across frames: the sprite of its round and the faint trail behind it.
+public struct Bullet: Codable, Equatable, Sendable {
+    public var id: Int
+    /// Where the round is (its middle), view-normalized.
+    public var position: Point
+    /// Unit direction of travel in view widths (screen y divided by the aspect, so it is alike in every direction).
+    public var direction: Point
+    /// Where its trail fades out behind it, view-normalized; nil when not seen. Its gun is there or farther back.
+    public var tail: Point?
+    /// The ammunition family, from the round's color: large rounds come from snipers, DMRs and bows. nil when unknown.
+    public var ammo: AmmoFamily?
+    /// Speed over the ground in view widths a second, measured over two frames or more; nil until then.
+    public var speed: Double?
+    /// Frames it has been seen in.
+    public var frames: Int
+    public var confidence: Double
+    public init(id: Int, position: Point, direction: Point, tail: Point? = nil, ammo: AmmoFamily? = nil, speed: Double? = nil,
+                frames: Int = 1, confidence: Double = 1) {
+        self.id = id; self.position = position; self.direction = direction; self.tail = tail; self.ammo = ammo; self.speed = speed
+        self.frames = frames; self.confidence = confidence
+    }
+    /// Seen in `BulletTracker.confirmFrames` frames or more, moving along its axis as fast as rounds do: not a look-alike.
+    public var confirmed: Bool { frames >= BulletTracker.confirmFrames && (speed.map { BulletTracker.speeds.contains($0) } ?? false) }
+}
+
 /// The interaction panel below your character. It names what the interact key will do,
 /// e.g. "M4 / Rare AR", "Hybrid Potion / Healing" or "Gold Chest / Interact".
 public struct InteractionPrompt: Codable, Equatable, Sendable {
@@ -299,6 +324,8 @@ public struct Observation: Codable, Equatable, Sendable {
     public var inventory: [InventorySlot] = []
     public var players: [PlayerTrack] = []
     public var obstacles: [Obstacle] = []
+    /// Bullets in flight (see `BulletTracker`).
+    public var bullets: [Bullet] = []
     /// How far static scenery moved on screen since the previous frame, opposite to your own movement; nil when no
     /// scenery was matched. A spot on the ground moves by the same amount.
     public var sceneryShift: Point?
@@ -340,6 +367,7 @@ public struct Observation: Codable, Equatable, Sendable {
         inventory = try c.decodeIfPresent([InventorySlot].self, forKey: .inventory) ?? []
         players = try c.decodeIfPresent([PlayerTrack].self, forKey: .players) ?? []
         obstacles = try c.decodeIfPresent([Obstacle].self, forKey: .obstacles) ?? []
+        bullets = try c.decodeIfPresent([Bullet].self, forKey: .bullets) ?? []
         sceneryShift = try c.decodeIfPresent(Point.self, forKey: .sceneryShift)
         ownVelocity = try c.decodeIfPresent(Point.self, forKey: .ownVelocity)
         hudAreas = try c.decodeIfPresent([Rect].self, forKey: .hudAreas) ?? []
@@ -360,10 +388,14 @@ public struct Features: Codable, Equatable, Sendable {
     public var combat = true; public var loot = true; public var healing = true
     /// Press interact at chests and crates.
     public var chests = true
-    /// Carry the long-range gun while nothing is happening.
+    /// Carry the long-range gun while nothing is happening, or the close-range one in close quarters.
     public var idleWeapon = true
     /// Reverse Impulse combos: pull an opponent to where a grenade, a shot or your shotgun is waiting (see `Combos`).
     public var combos = true
+    /// Keep firing for a moment at an opponent that walked out of view, where its course takes it (see `EnemyMemory`).
+    public var unseenFire = true
+    /// Fire back at an opponent shooting at you from out of view, located from its bullets (see `EnemyMemory`).
+    public var returnFire = true
     public init() {}
 }
 
@@ -387,6 +419,9 @@ public enum InputIntent: Codable, Equatable, Sendable {
     case fireAtPull
     /// Fire the Healing Gun along the aim: at a teammate, or square at a wall that bounces the round back to you.
     case fireHealing
+    /// Fire along the aim at an opponent out of view, where `EnemyMemory` places it, possibly beyond the view's edge: one
+    /// that walked out of view, or one shooting at you, located from its bullets. Only a mid- or long-range gun or a bow.
+    case fireUnseen(Point)
     case releaseAll
 }
 

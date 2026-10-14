@@ -85,6 +85,8 @@ You usually carry one close-range gun, one mid-range gun and one long-range gun.
 
 The Semi-Auto Sniper is ranked above the AWP because it fires about four times as often, which forgives misses and makes it the fastest killer at long range. The AWP still hits harder per shot.
 
+The assistant carries the long-range gun while nothing is happening and fights with it at long range. A bow you carry (XBow, Crossbow) counts as one, below any sniper, whatever the rarities. Bows are still never picked up for you. In close quarters the close-range gun is carried instead.
+
 ## Stats by class
 
 Damage and DPS are at the best rarity normally found. A range such as 10–15 is the damage at the far and near ends of the gun's range; for snipers the higher number is the far end. Range and spread words are the wiki's.

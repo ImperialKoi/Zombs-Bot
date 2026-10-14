@@ -62,6 +62,30 @@ public enum Targeting {
         return intercept.point
     }
 
+    /// Where a shot meets an opponent out of view (`EnemyMemory`): at `position` when the frame was taken, on screen as the view
+    /// stands or beyond its edges, moving at `velocity` over the ground (viewport fractions per second). Like `intercept`:
+    /// until the click acts you keep moving too, and the bullet's flight leads its ground course, fading over
+    /// `CombatSettings.leadPersistence`. Unlike it, nothing needs to be in view and there is no hit chance or range limit:
+    /// where an unseen opponent is, is itself a guess. `weapon` is the gun in hand.
+    public static func unseenIntercept(position: Point, velocity: Point, in o: Observation, weapon: ItemProfile, now: Double,
+                                       settings: CombatSettings = .init()) -> Point? {
+        guard position.isFinite, velocity.isFinite, o.player.isInViewport, o.aspect.isFinite, o.aspect > 0, now.isFinite,
+              o.timestamp.isFinite, now >= o.timestamp - 0.01, now - o.timestamp <= Policy.maxFrameAge, weapon.isValid,
+              weapon.kind == .weapon else { return nil }
+        let delay = max(0, now - o.timestamp) + settings.leadLatency
+        let current = position + (velocity - (o.ownVelocity ?? Point())) * delay
+        var flight = 0.0
+        // Bullets are about six times faster than players, so a few steps settle the flight time.
+        if weapon.projectileSpeed > 0 {
+            for _ in 0..<6 {
+                let d = current + velocity * lead(flight, persistence: settings.leadPersistence) - o.player
+                flight = Point(d.x, d.y / o.aspect).length / weapon.projectileSpeed
+            }
+        }
+        let predicted = current + velocity * lead(flight, persistence: settings.leadPersistence)
+        return predicted.isFinite ? predicted : nil
+    }
+
     /// `weapon` is the gun in hand: its zoom sets the view scale, and its bullet speed is in that view's widths per second.
     /// - Parameter friendly: the target is a teammate to heal (`Policy.validTeammate`), not an opponent.
     public static func intercept(_ target: PlayerTrack, in o: Observation, weapon: ItemProfile, now: Double,

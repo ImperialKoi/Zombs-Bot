@@ -130,5 +130,38 @@
     "y": 1018
    }
   ]
+ },
+ "rounds-large": {
+  "width": 3840,
+  "height": 1736,
+  "parts": [
+   {
+    "file": "rounds-large.png",
+    "x": 3300,
+    "y": 740
+   }
+  ]
+ },
+ "rounds-snow": {
+  "width": 3840,
+  "height": 1736,
+  "parts": [
+   {
+    "file": "rounds-snow.png",
+    "x": 2150,
+    "y": 900
+   }
+  ]
+ },
+ "rounds-clip": {
+  "width": 2880,
+  "height": 1376,
+  "parts": [
+   {
+    "file": "rounds-clip.png",
+    "x": 760,
+    "y": 240
+   }
+  ]
  }
 }

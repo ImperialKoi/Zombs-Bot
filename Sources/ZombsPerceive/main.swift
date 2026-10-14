@@ -88,7 +88,8 @@ func run() throws {
     let reviewed = try options.reviewed.map { try JSONDecoder().decode(Reviewed.self, from: Data(contentsOf: $0)) }
     let wanted = Set(reviewed?.samples.map { "\($0.matchID)/\($0.image)" } ?? [])
     var output = Data()
-    var hudTimes: [Double] = [], detectTimes: [Double] = [], decodeTimes: [Double] = []
+    var hudTimes: [Double] = [], detectTimes: [Double] = [], decodeTimes: [Double] = [], bulletTimes: [Double] = []
+    var sightings: [String: Int] = [:], confirmedRounds = Set<String>()
     var frames = 0, alive = 0, layouts = 0, prompts = 0, parsedPrompts = 0, selected = 0, readouts = 0
     var vocabulary: [String: Int] = [:], names: [String: Int] = [:]
     var vitalErrors: [Double] = [], vitalMissing = 0
@@ -127,6 +128,9 @@ func run() throws {
             let result = engine.process(image: pixels, ciImage: options.detect ? CIImage(cgImage: cg) : nil, timestamp: row.timestamp)
             frames += 1
             hudTimes.append(result.hudMilliseconds); if options.detect { detectTimes.append(result.detectorMilliseconds) }
+            if result.observation.phase == .alive { bulletTimes.append(result.bulletMilliseconds) }
+            for b in result.bulletSightings { sightings[b.ammo?.rawValue ?? "unknown", default: 0] += 1 }
+            for b in result.observation.bullets where b.confirmed { confirmedRounds.insert("\(info.matchID)#\(b.id)") }
             var o = result.observation
             if result.hud != nil { layouts += 1 }
             var decision: Decision?
@@ -147,6 +151,7 @@ func run() throws {
                     case .throwAt: actions["throw", default: 0] += 1
                     case .fireAtPull: actions["fire at pull", default: 0] += 1
                     case .fireHealing: actions["healing shot", default: 0] += 1
+                    case .fireUnseen: actions["fire unseen", default: 0] += 1
                     case .releaseAll: break
                     }
                 }
@@ -178,7 +183,20 @@ func run() throws {
                                          "squad": o.squad.map { ["name": $0.name as Any, "down": $0.down, "health": ($0.health * 10).rounded() / 10,
                                                                  "shield": ($0.shield * 10).rounded() / 10] },
                                          "blockers": o.obstacles.filter { $0.preventsEngagement }.map { "\($0.kind.rawValue)@\(($0.bounds.center.x * 100).rounded() / 100),\(($0.bounds.center.y * 100).rounded() / 100)" },
-                                         "hudMS": result.hudMilliseconds, "detectMS": result.detectorMilliseconds]
+                                         "hudMS": result.hudMilliseconds, "detectMS": result.detectorMilliseconds, "bulletMS": result.bulletMilliseconds,
+                                         "closeQuarters": Policy.closeQuarters(o),
+                                         "wallRays": [0.08, 0.12, 0.16, 0.2].map { r in Policy.closeQuartersRays(o, range: r).map { $0 ? 1 : 0 } },
+                                         "sightings": result.bulletSightings.map { b -> [String: Any] in
+                                             ["x": (b.position.x * 1000).rounded() / 1000, "y": (b.position.y * 1000).rounded() / 1000,
+                                              "dx": (b.direction.x * 100).rounded() / 100, "dy": (b.direction.y * 100).rounded() / 100,
+                                              "ammo": b.ammo?.rawValue as Any, "oriented": b.oriented, "trail": b.tail != nil, "confidence": b.confidence] },
+                                         "rounds": o.bullets.map { b -> [String: Any] in
+                                             ["id": b.id, "x": (b.position.x * 1000).rounded() / 1000, "y": (b.position.y * 1000).rounded() / 1000,
+                                              "ammo": b.ammo?.rawValue as Any, "frames": b.frames, "speed": b.speed.map { ($0 * 100).rounded() / 100 } as Any,
+                                              "confirmed": b.confirmed] },
+                                         "unseen": coordinator.memory.entries.map { e -> [String: Any] in
+                                             ["id": e.id, "source": e.source.rawValue, "x": (e.position.x * 1000).rounded() / 1000,
+                                              "y": (e.position.y * 1000).rounded() / 1000, "ammo": e.ammo?.rawValue as Any, "bullets": e.bullets] }]
             if let p = o.prompt { record["prompt"] = ["kind": p.kind.rawValue, "item": p.itemID as Any, "name": p.name, "subtitle": p.subtitle] }
             if let decision { record["decision"] = decision.reason; record["intents"] = decision.intents.map { "\($0)" } }
             if let hud = result.hud {
@@ -209,6 +227,8 @@ func run() throws {
         "promptVocabulary": vocabulary, "itemNames": names,
         "iconsInLibrary": library.entries.count, "iconsLearned": learned,
         "actions": actions, "decisionReasons": reasons,
+        "bullets": ["sightings": sightings, "confirmedRounds": confirmedRounds.count,
+                    "searchP50MS": percentile(bulletTimes, 0.5), "searchP95MS": percentile(bulletTimes, 0.95)],
         "bufferPath": ["compared": pathChecks.count, "meanIoU": pathChecks.isEmpty ? NSNull() : pathChecks.reduce(0, +) / Double(pathChecks.count),
                        "minIoU": pathChecks.min() as Any, "maxCountDifference": pathCounts.max() as Any],
         "vitals": ["compared": vitalErrors.count, "missingFrames": vitalMissing, "maxAbsError": vitalErrors.max() as Any,
