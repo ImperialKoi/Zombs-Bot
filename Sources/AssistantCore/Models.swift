@@ -66,6 +66,8 @@ public struct ItemProfile: Codable, Equatable, Sendable {
     /// How many of those points the gun is worth over an average gun of its class at the same rarity; the weapon
     /// chosen for a distance band adds it to the class's preference there.
     public var edge: Double = 0
+    /// The gun's tier in the ranking of docs/WEAPONS.md (S, A, B or C); nil when its name is not known.
+    public var rankingTier: String?
     /// Throwables: what one does where it lands; nil for items that are never thrown on purpose.
     public var effect: ThrowableEffect?
     /// Throwables: seconds from the throw until it goes off (a Healing Grenade's circle opens). Weapons: seconds until a
@@ -114,6 +116,7 @@ public struct ItemProfile: Codable, Equatable, Sendable {
         zoom = try c.decodeIfPresent(Double.self, forKey: .zoom) ?? 1
         power = try c.decodeIfPresent(Double.self, forKey: .power)
         edge = try c.decodeIfPresent(Double.self, forKey: .edge) ?? 0
+        rankingTier = try c.decodeIfPresent(String.self, forKey: .rankingTier)
         effect = try c.decodeIfPresent(ThrowableEffect.self, forKey: .effect)
         fuse = try c.decodeIfPresent(Double.self, forKey: .fuse) ?? 0
         radius = try c.decodeIfPresent(Double.self, forKey: .radius) ?? 0

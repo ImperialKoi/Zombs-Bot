@@ -2,6 +2,60 @@
 
 Updated October 14, 2026 on this Apple silicon Mac (8 GB M1).
 
+## Tier C guns, rarity first, and heals first below full, October 14
+
+You asked for three things:
+- Tier C guns are not worth picking up.
+- Early in the match, stock up on heals, and below full health or shield put healing and consumables first. For example, a big potion on the ground at half shield is picked up and drunk, and the gun is picked back up.
+- A Legendary beats an Epic of the same type.
+
+This was checked offline only.
+
+**Changes:**
+- **Tier C guns** (KSG Shotgun, Hunting Rifle, Glock, P2000) are never picked up. The tier follows each gun's rank in [the weapons reference](WEAPONS.md). One you carry is the first to go when a slot is needed, unless it is your only gun.
+- **Rarity first within a class.**
+  - Pickups: a higher rarity of the same class always wins, so a Legendary AK replaces an Epic M4 and not the reverse.
+  - Fights: of one class only the rarest loaded guns are considered. A gun with an empty magazine does not push out a loaded one, so switching still beats reloading.
+  - The ranking decides only between guns of one rarity, as before (UMP over MP5).
+  - This reverses one choice of the ranking: a Legendary Bolt Mk. II now beats an Epic Semi-Auto Sniper.
+- **Below full health or shield**, the order is: a potion on the panel, then a chest (one press, often with more potions), then drinking, then other loot. At full, loot still goes first.
+- **Drinking from the ground.** With a full inventory, a potion that the heal plan would drink all of now is drunk from a borrowed slot:
+  - The utility item is lent first, else the gun you would miss least.
+  - That potion is drunk before the ones you carry.
+  - The lent item is picked up again as soon as the slot is empty.
+  - Before, this happened only when nothing you carried could heal, and only for a single item.
+- **Early in the match** (the first 180 s, `CombatSettings.earlyGame`), a potion goes into any free slot, even one kept for a missing gun. Guns later take back slots from heals beyond the two kept.
+- **Low on health** keeps its extra rights: a slot kept for a gun, and a potion that cannot help swapped out for one that can.
+
+**Tests.** 182 Swift tests pass.
+- New tests cover:
+  - Tier C guns skipped, and a carried one going first;
+  - the rarer gun used in a fight, unless its magazine is empty;
+  - a Big Shield at half shield drunk from a borrowed slot, with the gun taken back.
+- Changed to the new rules:
+  - an Epic Semi-Auto no longer replaces a Legendary Bolt Mk. II, and the Bolt Mk. II is carried when idle;
+  - a Hunting Rifle in the loadout test became a Bolt-Action Sniper;
+  - below full, a heal now goes before a gun pickup;
+  - a potion takes a reserved slot early in the match;
+  - a chest opens during a heal's slot switch, while a gun waits.
+
+**Replays** (`ZombsPerceive --decide`, seeded icon library), committed version against this one:
+
+| | Solo `582E17` before → after | Solo `78E1A3` before → after |
+|---|---|---|
+| Tier C pickups (presses) | P2000 2 → 0 | KSG 5 → 0 |
+| Potion pickups (presses) | 6 → 8 | 19 → 23 |
+| Potion uses (frames) | 34 → 40 | 70 → 86 |
+| Shots and chests | unchanged | unchanged |
+
+- At `582E17`, a hybrid first skipped as "inventory full" became "Swap Frag Grenade for Hybrid Potion to drink it, then take it back".
+- Small and big shields first skipped as "keeping free slots for missing guns" were taken as "stocking up on heals early".
+- The recordings do not respond to the assistant's keys, so taking a lent item back cannot show there; a test covers it.
+
+**Unverified live:**
+- how often the borrowed-slot drink happens in play, and whether standing still for it suits you;
+- whether 3 minutes is the right "early game".
+
 ## Healing Grenades, the Healing Gun and teammates' health, October 14
 
 You asked for:

@@ -31,9 +31,12 @@ public struct CombatSettings: Codable, Equatable, Sendable {
     /// direction, and clicks stay away from the window's edges.
     public var aimRadius = 0.35
     /// Low on health: below this much health, or below twice this in health and shield together. A potion that helps
-    /// then comes first: one on the panel is picked up, even into a slot kept for a missing gun, and drinking goes
-    /// before other loot.
+    /// may then take a slot kept for a missing gun, or swap out a potion that cannot help now. (Below full health or
+    /// shield, potions and drinking already go before other loot.)
     public var lowHealth = 50.0
+    /// Seconds from the start of a match in which potions are stocked up: one goes into any free slot, even one kept for
+    /// a missing gun. Guns still take back a slot from heals beyond the two kept.
+    public var earlyGame = 180.0
     /// Grenades land where you click, so a throw lands within this many view heights of your character: the grenade
     /// circle, separate from the crosshair's. Clicks also stay off the HUD and away from the view's edges
     /// (`Policy.clickable`); at 1.25 the circle covers every corner of a wide view, leaving only those limits.
@@ -56,6 +59,7 @@ public struct CombatSettings: Codable, Equatable, Sendable {
         idleUserRespect = try c.decodeIfPresent(Double.self, forKey: .idleUserRespect) ?? d.idleUserRespect
         aimRadius = try c.decodeIfPresent(Double.self, forKey: .aimRadius) ?? d.aimRadius
         lowHealth = try c.decodeIfPresent(Double.self, forKey: .lowHealth) ?? d.lowHealth
+        earlyGame = try c.decodeIfPresent(Double.self, forKey: .earlyGame) ?? d.earlyGame
         throwRadius = try c.decodeIfPresent(Double.self, forKey: .throwRadius) ?? d.throwRadius
     }
     public var isValid: Bool {
@@ -63,7 +67,7 @@ public struct CombatSettings: Codable, Equatable, Sendable {
         && closeCutoff > 0 && longCutoff > closeCutoff + 2 * bandHysteresis && bandHysteresis >= 0 && switchDwell >= 0
         && (0...1).contains(minPlayerConfidence) && (0...1).contains(minAffiliationConfidence) && (0...5).contains(minHealSlots)
         && (0...0.3).contains(leadLatency) && (0...10).contains(leadPersistence) && (0.5...30).contains(idleQuiet) && (0...60).contains(idleAfterFight) && (0...600).contains(idleUserRespect)
-        && (0.1...0.45).contains(aimRadius) && (0...100).contains(lowHealth) && (0.1...1.25).contains(throwRadius)
+        && (0.1...0.45).contains(aimRadius) && (0...100).contains(lowHealth) && (0...900).contains(earlyGame) && (0.1...1.25).contains(throwRadius)
     }
 }
 
@@ -265,6 +269,11 @@ public enum Policy {
     public static func lowOnHealth(_ o: Observation, _ s: CombatSettings = .init()) -> Bool {
         guard let hp = o.health, let shield = o.shield, o.hudConfidence >= 0.98 else { return false }
         return hp < s.lowHealth || hp + shield < 2 * s.lowHealth
+    }
+    /// Health or shield below full, read clearly (a bar reads within a fraction of a point).
+    public static func belowFull(_ o: Observation) -> Bool {
+        guard let hp = o.health, let shield = o.shield, o.hudConfidence >= 0.98 else { return false }
+        return hp < 99.5 || shield < 99.5
     }
     public static func healingBenefit(_ profile: ItemProfile, in o: Observation) -> Double {
         guard let hp = o.health, let shield = o.shield, o.hudConfidence >= 0.98,

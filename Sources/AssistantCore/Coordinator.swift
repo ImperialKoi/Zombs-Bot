@@ -48,6 +48,8 @@ public final class Coordinator {
     private var arrivingStack: (item: String, amount: Int, until: Double)?
     /// Slots last read as empty: a consumable that then appears in one is a single ground stack, picked up by either of you.
     private var seenEmpty: Set<Int> = []
+    /// The first frame of this match the assistant saw alive; a menu or death screen ends the match.
+    private var matchStart: Double?
     /// The stack badge last read for the item on the panel ("x4"): it is not readable in every frame.
     private var badge: (name: String, count: Int)?
     /// Since when the HUD has been unreadable while a heal plan waits, and when the planned item has been selected
@@ -147,7 +149,7 @@ public final class Coordinator {
     public func reset() {
         pending = nil; heal = nil; healPlan = nil; recovery = nil; targetID = nil
         lastThreat = nil; lastPlayerSeen = -.infinity; vitals = []; arriving = []; lastFrame = -.infinity; lastShot = -.infinity
-        unclearSince = nil; inHandSince = nil; noAmmoUntil = [:]; stacks = [:]; arrivingStack = nil; seenEmpty = []; badge = nil
+        unclearSince = nil; inHandSince = nil; noAmmoUntil = [:]; stacks = [:]; arrivingStack = nil; seenEmpty = []; badge = nil; matchStart = nil
         cooldownUntil = -.infinity; pickupBlockedUntil = [:]; chestBlockedUntil = [:]; interactPresses = [:]; priorWeaponSlot = nil
         band = nil; lastRangeSwitch = -.infinity; lastTargetSeen = -.infinity; healAttempts = []; healPausedUntil = -.infinity
         lastRequested = nil; lastSelection = nil; userChoiceUntil = -.infinity; lootNote = nil; lastIdleRequest = -.infinity
@@ -223,18 +225,28 @@ public final class Coordinator {
     /// SMG replaces a shotgun; within a class, the gun ranking decides.
     static let loadoutClass: [WeaponRole: WeaponClass] = [.long: .sniper, .medium: .ar, .close: .smg]
     static func inLoadout(_ p: ItemProfile) -> Bool { p.role.map { loadoutClass[$0] == p.weaponClass } ?? false }
-    /// Worth of a gun for its range: the loadout's class first, then `value`.
-    static func keep(_ p: ItemProfile) -> Double { (inLoadout(p) ? 1000 : 0) + value(p) }
-    /// Whether a gun replaces one of its range: of the loadout's class when the other is not, else worth `upgradeMargin` more.
+    /// Worth of a gun for its range: the loadout's class first, then rarity (a Legendary beats an Epic), then `value`.
+    static func keep(_ p: ItemProfile) -> Double { (inLoadout(p) ? 1000 : 0) + Double(p.tier) * 100 + value(p) }
+    /// Whether a gun replaces one of its range: of the loadout's class when the other is not; of the same class, a higher
+    /// rarity wins outright (a Legendary AR beats any Epic AR) and the ranking only decides within one rarity, by
+    /// `upgradeMargin`.
     static func better(_ incoming: ItemProfile, than held: ItemProfile) -> Bool {
-        inLoadout(incoming) != inLoadout(held) ? inLoadout(incoming) : value(incoming) > value(held) + upgradeMargin
+        if inLoadout(incoming) != inLoadout(held) { return inLoadout(incoming) }
+        if incoming.weaponClass == held.weaponClass, incoming.tier != held.tier { return incoming.tier > held.tier }
+        return value(incoming) > value(held) + upgradeMargin
     }
     /// Grenades, Reverse Impulses, a Grappling Hook: a throwable the catalog names. The loadout has room for one; the best
     /// by `ItemProfile.power` stays.
     static func isUtility(_ p: ItemProfile) -> Bool { p.kind == .throwable && p.effect != nil }
-    /// Score of a weapon for a distance band: class preference, then rarity and how good the gun is for its class.
+    /// Score of a weapon for a distance band: class preference, then rarity and how good the gun is for its class. Guns
+    /// are first narrowed to the rarest of each class (`rarestOfEachClass`).
     static func bandScore(_ p: ItemProfile, band: WeaponRole) -> Double? {
         preference(p, band: band).map { $0 + Double(p.tier) * 2 + p.edge }
+    }
+    /// Of one class, only the rarest guns: a Legendary AR is used before any Epic AR, whatever their ranking. A gun with an
+    /// empty magazine does not push a loaded one out, so switching still beats reloading mid-fight.
+    static func rarestOfEachClass(_ guns: [(InventorySlot, ItemProfile)]) -> [(InventorySlot, ItemProfile)] {
+        guns.filter { gun in !guns.contains { $0.1.weaponClass == gun.1.weaponClass && $0.1.tier > gun.1.tier && $0.0.ammo != 0 } }
     }
     /// The band for a target distance; the current band extends by the hysteresis margin.
     func band(for distance: Double) -> WeaponRole {
@@ -261,10 +273,12 @@ public final class Coordinator {
             if !o.manualOverride { lastSelection = nil }
             // A key you press yourself may have added to a stack or drunk from one.
             else { for slot in stacks.keys { stacks[slot]?.known = false } }
+            if o.phase == .menu || o.phase == .dead { matchStart = nil }
             return idle(o.timestamp, reason)
         }
         guard o.timestamp > lastFrame else { return idle(o.timestamp, "Awaiting a new frame") }
         lastFrame = o.timestamp
+        if matchStart == nil { matchStart = t }
         // A combo's spot moves on screen with you in every frame, also while a slot switch is on its way.
         if var c = combo, var mark = c.mark { mark.follow(o, zoom: viewZoom(o, keeping: mark.zoom)); c.mark = mark; combo = c }
         if lastThreat == nil { lastThreat = t }
@@ -358,7 +372,8 @@ public final class Coordinator {
                     let share = gain.health + gain.shield > 0 ? gain.health / (gain.health + gain.shield) : 0.5
                     arriving.append((h.item, max(0, gain.health - seen * share), max(0, gain.shield - seen * (1 - share)), t, t + item.overTime))
                 }
-                if !slot!.isKnownEmpty { recovery = nil } // Retain the remaining stack.
+                // A stack left in the borrowed slot is drunk next; what was lent comes back once the slot is empty (never by
+                // swapping out the potions left), or not at all after 30 s.
                 return idle(o.timestamp, "Healing confirmed")
             }
             if elapsed > h.duration + 1.5 {
@@ -374,10 +389,10 @@ public final class Coordinator {
                 if o.selectedSlot == slot && o.selectedSlotConfidence >= 0.98 && t >= settle { pending = nil }
                 else if t >= deadline { pending = nil; recovery = nil; cooldownUntil = t + 1; return idle(o.timestamp, "Slot selection timed out") }
                 // A slot switch on its way does not hold up a chest or an item for a free slot; while it brings a potion to
-                // you low on health, only another potion. A combo's switch is part of a fight, and a Healing Grenade's or the
+                // drink, only another potion or a chest. A combo's switch is part of a fight, and a Healing Grenade's or the
                 // Healing Gun's part of a heal that does not wait.
                 else if !threatened, combo == nil, support == nil, let decision = takeLoot(o, now: t, safeToHeal: safeToHeal, swapWait: "waiting for slot \(slot)",
-                                                             potionsOnly: healPlan != nil && Policy.lowOnHealth(o, settings)) { return decision }
+                                                             healFirst: healPlan != nil) { return decision }
                 else { return idle(o.timestamp, "Waiting for selected slot") }
             case let .pickup(name, item, amount, before, deadline):
                 let gained = Self.inventoryGained(from: before, to: o.inventory)
@@ -440,21 +455,17 @@ public final class Coordinator {
         // A Healing Grenade or the Healing Gun for you or a teammate low on health: one throw or a few rounds, before loot.
         if features.healing, !threatened, let decision = supportStep(o, now: t, safeToHeal: safeToHeal) { return decision }
         let swapWait = healPlan != nil ? "swapping once healed" : t < cooldownUntil ? "waiting for the game to settle" : nil
-        // Low on health, a potion that helps comes first: picking one up, then drinking, then any other loot.
-        if !threatened, Policy.lowOnHealth(o, settings) {
-            if let decision = takeLoot(o, now: t, safeToHeal: safeToHeal, swapWait: swapWait, potionsOnly: true) { return decision }
+        // What was lent for a drink is taken back as soon as its slot is drunk empty, while it is still on the panel.
+        if !threatened, let decision = takeBack(o, now: t) { return decision }
+        // Below full health or shield, healing comes first: a potion on the panel, a chest (one press, often with more),
+        // then drinking, then any other loot.
+        if !threatened, Policy.belowFull(o) {
+            if let decision = takeLoot(o, now: t, safeToHeal: safeToHeal, swapWait: swapWait, healFirst: true) { return decision }
             if features.healing, t >= cooldownUntil, let decision = healing(o, now: t, safeToHeal: safeToHeal) { return decision }
         }
         if !threatened, let decision = takeLoot(o, now: t, safeToHeal: safeToHeal, swapWait: swapWait) { return decision }
         guard t >= cooldownUntil else { return idle(o.timestamp, "Waiting for the game to settle") }
         if threatened { return idle(o.timestamp, holdReason(o) ?? "Threat visible; withholding looting and healing") }
-
-        if let r = recovery, r.consumed != nil {
-            guard let slot = o.slot(r.slot), slot.isKnownEmpty else { recovery = nil; return idle(o.timestamp, "Recovery slot is no longer empty") }
-            if features.loot, let prompt = Policy.pickupPrompt(o), let id = prompt.itemID, Self.sameItem(id, r.weapon), pickupBlockedUntil[prompt.name] == nil {
-                return pickup(prompt, replacing: nil, in: o, now: t, reason: "Pick up \(prompt.name) again after healing")
-            }
-        }
 
         if features.healing, let decision = healing(o, now: t, safeToHeal: safeToHeal) { return decision }
         if let slotID = priorWeaponSlot, let slot = o.slot(slotID), profile(slot)?.kind == .weapon {
@@ -477,9 +488,12 @@ public final class Coordinator {
         guard t >= userChoiceUntil, heal == nil, healPlan == nil, support == nil, o.selectedSlotConfidence >= 0.98,
               t - (lastThreat ?? t) >= settings.idleQuiet, t - lastPlayerSeen >= settings.idleQuiet,
               t - lastTargetSeen >= settings.idleAfterFight else { return nil }
-        let best = o.inventory.compactMap { slot -> (slot: InventorySlot, item: ItemProfile, score: Double)? in
-            guard let p = profile(slot), p.kind == .weapon, slot.hasAnyAmmo, noAmmoUntil[slot.index] == nil,
-                  let score = Self.bandScore(p, band: .long) else { return nil }
+        let guns = o.inventory.compactMap { slot -> (InventorySlot, ItemProfile)? in
+            guard let p = profile(slot), p.kind == .weapon, slot.hasAnyAmmo, noAmmoUntil[slot.index] == nil else { return nil }
+            return (slot, p)
+        }
+        let best = Self.rarestOfEachClass(guns).compactMap { slot, p -> (slot: InventorySlot, item: ItemProfile, score: Double)? in
+            guard let score = Self.bandScore(p, band: .long) else { return nil }
             return (slot, p, score + (slot.index == o.selectedSlot ? 4 : 0))
         }.max { $0.score < $1.score }
         guard let best, best.slot.index != o.selectedSlot, t - lastIdleRequest >= 5 else { return nil }
@@ -567,6 +581,9 @@ public final class Coordinator {
             return HealPlanner.Stack(entry.item, count: counted ?? entry.slot.count)
         }
         let thresholds = continuing ? HealPlanner.continuing : (Policy.minHealingBenefit, 0)
+        // A potion picked up into a borrowed slot is drunk first, so the slot empties and what was lent can be taken back.
+        if let r = recovery, r.consumed == nil, let lent = held.first(where: { $0.slot.index == r.slot && $0.item.id == r.consumable }),
+           HealPlanner.value(lent.item, health: health, shield: shield, minimumBenefit: thresholds.0) != nil { return lent }
         guard let first = HealPlanner.plan(health: health, shield: shield, stacks: supply, minimumBenefit: thresholds.0, slack: thresholds.1).first else { return nil }
         let holding = held.filter { $0.item.id == first.id }
         return holding.first { $0.slot.index == o.selectedSlot } ?? holding.first
@@ -683,7 +700,7 @@ public final class Coordinator {
         // Exploding rounds hurt you too: a gun whose round would go off near you (the Assault SCAR on an opponent next to
         // you, or with a tree in the way) is not used on this one.
         let armed = carried.filter { Policy.explosiveSafe(o, weapon: $0.1, toward: target.position, zoom: zoom) }
-        var weapons = armed.compactMap { slot, p -> (InventorySlot, ItemProfile, Double)? in
+        var weapons = Self.rarestOfEachClass(armed).compactMap { slot, p -> (InventorySlot, ItemProfile, Double)? in
             guard distance <= p.maxRange, var score = Self.bandScore(p, band: band) else { return nil }
             if slot.index == o.selectedSlot {
                 score += 4 // Avoid trading a weapon for a near-equal one.
@@ -1080,12 +1097,24 @@ public final class Coordinator {
     /// Opening a chest or taking an item is one key press, and the loot stays behind once you walk on, so it comes before
     /// heals and settling times: it never changes the selected slot. A swap into a full inventory does change it (the game
     /// swaps out the selected item), so it waits while `swapWait` says why.
-    /// - Parameter potionsOnly: only a consumable on the panel, for when you are low on health and a heal comes next.
-    private func takeLoot(_ o: Observation, now t: Double, safeToHeal: Bool, swapWait: String?, potionsOnly: Bool = false) -> Decision? {
-        if features.loot, let decision = loot(o, now: t, safeToHeal: safeToHeal, swapWait: swapWait, potionsOnly: potionsOnly) { return decision }
-        if !potionsOnly, features.chests, let decision = openChest(o, now: t) { return decision }
+    /// - Parameter healFirst: only a potion or a chest, for when drinking comes next.
+    private func takeLoot(_ o: Observation, now t: Double, safeToHeal: Bool, swapWait: String?, healFirst: Bool = false) -> Decision? {
+        if features.loot, let decision = loot(o, now: t, safeToHeal: safeToHeal, swapWait: swapWait, potionsOnly: healFirst) { return decision }
+        if features.chests, let decision = openChest(o, now: t) { return decision }
         return nil
     }
+
+    /// Takes back what was lent for a drink (see `loot`) once its slot is drunk empty: one press into that slot.
+    private func takeBack(_ o: Observation, now t: Double) -> Decision? {
+        guard let r = recovery, r.consumed != nil else { return nil }
+        guard let slot = o.slot(r.slot), slot.isKnownEmpty else { recovery = nil; return idle(o.timestamp, "Recovery slot is no longer empty") }
+        guard features.loot, let prompt = Policy.pickupPrompt(o), let id = prompt.itemID, Self.sameItem(id, r.weapon),
+              pickupBlockedUntil[prompt.name] == nil else { return nil }
+        return pickup(prompt, replacing: nil, in: o, now: t, reason: "Pick up \(prompt.name) again after healing")
+    }
+
+    /// Early in the match: within `CombatSettings.earlyGame` of the first frame seen alive.
+    private func earlyGame(_ t: Double) -> Bool { matchStart.map { t - $0 < settings.earlyGame } ?? true }
 
     /// Presses interact for the prompt's item. With a free slot the game fills it; a full
     /// inventory swaps out the selected slot, so the slot to replace is selected first.
@@ -1146,12 +1175,15 @@ public final class Coordinator {
         let missingRoles = WeaponRole.allCases.filter { role in !weapons.contains { profile($0)?.role == role } }
         // What the loadout has no place for, least needed first: a second gun for a range (the weaker), then utility
         // beyond the one kept. Launchers, bows and items it cannot name are yours to manage and never go.
-        let spareGuns = WeaponRole.allCases.flatMap { role in weapons.filter { profile($0)?.role == role }.sorted { keep($0) > keep($1) }.dropFirst() }
-            .sorted { keep($0) < keep($1) }
+        let seconds = WeaponRole.allCases.flatMap { role in weapons.filter { profile($0)?.role == role }.sorted { keep($0) > keep($1) }.dropFirst() }
+        // A tier C gun is not worth its slot either, unless it is your only gun.
+        let tierC = weapons.count > 1 ? weapons.filter { slot in profile(slot)?.rankingTier == "C" && !seconds.contains { $0.index == slot.index } } : []
+        let spareGuns = (seconds + tierC).sorted { keep($0) < keep($1) }
         let spare = spareGuns + utility.dropFirst().reversed()
         switch incoming.kind {
         case .weapon:
             guard let role = incoming.role else { return skip("launchers and special weapons stay manual") }
+            guard incoming.rankingTier != "C" else { return skip("a tier C gun is not worth picking up") }
             let sameRole = weapons.filter { profile($0)?.role == role }
             if let best = sameRole.max(by: { keep($0) < keep($1) }), let worst = sameRole.min(by: { keep($0) < keep($1) }) {
                 guard Self.better(incoming, than: profile(best)!) else { return skip("not better than \(name(best))") }
@@ -1209,25 +1241,28 @@ public final class Coordinator {
                 return skip("its stack may be full, and the inventory is full")
             }
             let stacksFull = !same.isEmpty ? "its stack is full; " : ""
-            // Keep enough free slots for the weapon roles still missing, unless you are low on health and it helps now.
+            // Keep enough free slots for the weapon roles still missing, unless it helps now and you are low on health, or it
+            // is early in the match, when potions are stocked up (guns take back a slot from heals beyond the two kept).
             if empty.count > missingRoles.count { return take("Pick up \(incoming.name)") }
             if urgent, !empty.isEmpty { return take("Pick up \(incoming.name): low on health") }
+            if earlyGame(t), !empty.isEmpty { return take("Pick up \(incoming.name): stocking up on heals early") }
             // Full, with something the loadout has no place for: the potion takes its slot for good.
             if empty.isEmpty, let victim = spare.first { return take(replacing: victim, "Pick up \(incoming.name) in place of \(name(victim))") }
-            // Full inventory, nothing held that helps now, and a quiet moment to drink it: make room.
-            if features.healing, safeToHeal, empty.isEmpty, helps, !heals.contains(where: { Policy.healingBenefit(profile($0)!, in: o) >= Policy.minHealingBenefit }) {
-                // Low on health, a consumable that cannot help now goes first; it is not picked up again.
-                if urgent, let victim = heals.min(by: { profile($0)!.keepValue < profile($1)!.keepValue }) {
+            // Full inventory, a quiet moment, and the heal plan would drink all of it now: drink it from a borrowed slot and
+            // take back what was lent, so the potions you carry are kept for later.
+            if features.healing, safeToHeal, empty.isEmpty, helps {
+                // Low on health, a potion that cannot help now goes for good.
+                if urgent, let victim = heals.filter({ Policy.healingBenefit(profile($0)!, in: o) < Policy.minHealingBenefit }).min(by: { profile($0)!.keepValue < profile($1)!.keepValue }) {
                     return take(replacing: victim, "Swap \(name(victim)) for \(incoming.name): low on health")
                 }
-                // Otherwise your utility item, else the weakest gun, to be picked up again once the slot is drunk empty: only
-                // for a stack that will all be drunk now (a single item, or when low, all the doses the heal plan would take).
+                // Your utility item is lent first, else the gun you would miss least.
+                // One lend at a time: the one under way goes on (its slot switch done, the press follows).
                 let drunk = HealPlanner.plan(health: o.health ?? 100, shield: o.shield ?? 100, stacks: [HealPlanner.Stack(incoming, count: amount)]).count
-                if amount == 1 || urgent && drunk >= amount,
-                   let slot = utility.first ?? weapons.min(by: { Self.value(profile($0)!) < Self.value(profile($1)!) }), let weapon = slot.itemID {
+                if drunk >= amount, let slot = utility.first ?? weapons.min(by: { keep($0) < keep($1) }), let lent = slot.itemID,
+                   recovery.map({ $0.slot == slot.index && $0.consumable == id }) ?? true {
                     if let swapWait { return skip(swapWait) }
-                    if recovery == nil { recovery = Recovery(slot: slot.index, weapon: weapon, consumable: id, created: t) }
-                    return take(replacing: slot, "Swap \(name(slot)) for \(incoming.name) to heal")
+                    if recovery == nil { recovery = Recovery(slot: slot.index, weapon: lent, consumable: id, created: t) }
+                    return take(replacing: slot, "Swap \(name(slot)) for \(incoming.name) to drink it, then take it back")
                 }
             }
             return skip(stacksFull + (empty.isEmpty ? "inventory full" : "keeping free slots for missing guns"))

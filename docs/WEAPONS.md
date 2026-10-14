@@ -248,9 +248,10 @@ The catalog (`Sources/AssistantCore/Catalog.swift`) lists the 37 guns a prompt c
   - one slot for heals.
 
   A gun of the class the loadout wants for its range beats any other gun there. So an SMG replaces a shotgun however the two rank, an AR a pistol or LMG, and a sniper a DMR.
-- **Pickups** within a class compare power: 101 minus the rank at the gun's best normal rarity, 3 points per rarity step from there. A gun replaces one of its class when it is worth at least 1.5 more. So a Rare M4 (89) replaces a Rare AK (76).
+- **Pickups** within a class go by rarity first: a Legendary AK replaces an Epic M4, though the M4 ranks higher. Between guns of one rarity they compare power: 101 minus the rank at the gun's best normal rarity, 3 points per rarity step from there. A gun replaces one of its class when it is worth at least 1.5 more, so a Rare M4 (89) replaces a Rare AK (76).
+- **Tier C guns** (KSG Shotgun, Hunting Rifle, Glock, P2000) are never picked up. One you carry is the first to go when a slot is needed, unless it is your only gun.
 - **When the loadout needs a slot** (a missing gun, a first heal, a first utility item), what it has no place for goes first: a second gun for a range, then a second utility item. A missing gun may also take the slot of a second heal stack. With a full inventory and a potion needed now, your utility item is lent for the drink, else your weakest gun, and picked up again afterwards.
-- **Range bands** still prefer shotguns up close, assault rifles at mid range and snipers far away. Within that, a better gun of a class wins: the UMP over the MP5, the Semi-Auto Sniper over a Bolt Mk. II one rarity higher.
+- **Range bands** still prefer shotguns up close, assault rifles at mid range and snipers far away. Of one class the rarest loaded gun is used, so a Legendary Bolt Mk. II comes before an Epic Semi-Auto Sniper. Between guns of one rarity the better one wins: the UMP over the MP5.
 - **Firing** uses each gun's own rate:
   - The Semi-Auto Sniper clicks four times a second.
   - The VSS, Hunting Rifle and the automatic pistols are held down.

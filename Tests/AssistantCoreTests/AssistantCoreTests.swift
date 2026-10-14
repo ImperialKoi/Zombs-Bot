@@ -304,10 +304,12 @@ struct AssistantCoreTests {
         let d=engine();var p=observation();p.health=60;p.inventory[2] = .init(3,itemID:"med",count:1)
         _=step(d,p);p.timestamp=2.1;expectTrue(step(d,p).intents.contains(.selectSlot(3)))
         p.timestamp=2.15;p.prompt=chestPrompt();expectTrue(step(d,p).intents.contains(.open("Gold Chest")))
-        // …unless you are low on health: then the drink comes first, and the chest waits.
+        // …low on health too, as it may hold more potions; a gun waits for the drink.
         let low=engine();var l=observation();l.health=20;l.inventory[2] = .init(3,itemID:"med",count:1)
         _=step(low,l);l.timestamp=2.1;expectTrue(step(low,l).intents.contains(.selectSlot(3)))
-        l.timestamp=2.15;l.prompt=chestPrompt();expectEqual(step(low,l).reason,"Waiting for selected slot")
+        l.timestamp=2.15;l.prompt=chestPrompt();expectTrue(step(low,l).intents.contains(.open("Gold Chest")))
+        l.timestamp=2.2;l.prompt=itemPrompt("SCAR","rifle_gold",.weapon)
+        let drink=step(low,l);expectFalse(drink.intents.contains(.pickup("SCAR")));expectEqual(drink.reason,"Select Med Kit to heal")
         // …and an item is taken before a heal starts: the loot stays behind once you walk on.
         let e=engine();var q=observation();q.health=20;q.inventory[2] = .init(3,itemID:"med",count:1)
         _=step(e,q);q.timestamp=2.1;q.prompt=itemPrompt("Bandage","bandage")
@@ -713,9 +715,14 @@ struct AssistantCoreTests {
         // Near equals are not worth a swap: a Legendary Uzi for a Legendary MP5.
         (c,o)=stocked("smg:legendary:mp5","ar:rare:m4","sniper:rare:bolt_mk2");o.prompt=gunPrompt("Uzi","Legendary SMG")
         expectFalse(step(c,o).intents.contains(.selectSlot(2)))
-        // The Semi-Auto Sniper beats a Bolt Mk. II a rarity above it.
+        // Of one class the rarer gun wins, whatever the ranking: an Epic Semi-Auto Sniper does not replace a Legendary Bolt Mk. II…
         (c,o)=stocked("smg:rare:mp5","ar:rare:m4","sniper:legendary:bolt_mk2");o.prompt=gunPrompt("Semi-Auto Sniper","Epic Sniper")
-        expectTrue(step(c,o).intents.contains(.selectSlot(4)))
+        expectEqual(step(c,o).reason,"Not picking up Epic Semi-Auto Sniper: not better than Legendary Bolt Mk. II Sniper")
+        // …and a Legendary AK replaces an Epic M4.
+        (c,o)=stocked("smg:rare:mp5","ar:epic:m4","sniper:rare:bolt_mk2");o.prompt=gunPrompt("AK","Legendary AR")
+        expectTrue(step(c,o).intents.contains(.selectSlot(3)))
+        (c,o)=stocked("smg:rare:mp5","ar:legendary:ak","sniper:rare:bolt_mk2");o.prompt=gunPrompt("M4","Epic AR")
+        expectEqual(step(c,o).reason,"Not picking up Epic M4: not better than Legendary AK")
         // A gun whose name was never read counts as an average one of its class.
         (c,o)=stocked("smg:rare:mp5","ar:legendary","sniper:rare:bolt_mk2");o.prompt=gunPrompt("M4","Legendary AR")
         expectTrue(step(c,o).intents.contains(.selectSlot(3)))
@@ -729,12 +736,12 @@ struct AssistantCoreTests {
         o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"smg:legendary:mp5",ammo:30,reserveAmmo:90),.init(3,itemID:"smg:legendary:ump",ammo:35,reserveAmmo:90),
                      .init(4,count:0),.init(5,count:0),.init(6,count:0)]
         expectTrue(step(c,o).intents.contains(.selectSlot(3)))
-        // In a quiet spell the Semi-Auto Sniper is carried rather than a Bolt Mk. II a rarity above it.
+        // In a quiet spell the rarer sniper is carried: a Legendary Bolt Mk. II before an Epic Semi-Auto Sniper.
         let q=Coordinator(catalog:.standard);var p=observation();p.selectedSlot=2
         p.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"smg:rare:mp5",ammo:30,reserveAmmo:90),.init(3,itemID:"sniper:legendary:bolt_mk2",ammo:5,reserveAmmo:10),
                      .init(4,itemID:"sniper:epic:semi_auto_sniper",ammo:5,reserveAmmo:10),.init(5,count:0),.init(6,count:0)]
         _=step(q,p);p.timestamp=2.6
-        let d=step(q,p);expectTrue(d.intents.contains(.selectSlot(4)));expectEqual(d.reason,"Carry Epic Semi-Auto Sniper while nothing is happening")
+        let d=step(q,p);expectTrue(d.intents.contains(.selectSlot(3)));expectEqual(d.reason,"Carry Legendary Bolt Mk. II Sniper while nothing is happening")
     }
     @Test func testSemiAutoSniperFiresFourTimesASecond() throws {
         let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
@@ -805,18 +812,21 @@ struct AssistantCoreTests {
         expectEqual(ItemCatalog.standard.heal(id:"large_shield")?.useDuration,5)
     }
     @Test func testLowOnHealthAPotionTakesASlotKeptForAGun() {
-        // One free slot, kept for the missing close-range gun.
-        func offer(health:Double)->Decision {
+        // One free slot, kept for the missing close-range gun, offered `after` seconds into the match.
+        func offer(health:Double,after:Double)->Decision {
             let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
             var o=observation();o.selectedSlot=3;o.health=health
             o.inventory=[.init(1,itemID:"fists"),.init(2,count:0),.init(3,itemID:"ar:rare:m4",ammo:30,reserveAmmo:90),
                          .init(4,itemID:"sniper:rare:bolt_mk2",ammo:5,reserveAmmo:10),.init(5,itemID:"large_shield"),.init(6,itemID:"small_shield",count:2)]
-            o.prompt=potionPrompt(["Med Kit","Healing"])
+            _=step(c,o);o.timestamp=after;o.prompt=potionPrompt(["Med Kit","Healing"])
             return step(c,o)
         }
-        var d=offer(health:100);expectFalse(d.intents.contains(.pickup("Med Kit")))
+        // Early in the match potions are stocked up…
+        var d=offer(health:100,after:1);expectEqual(d.reason,"Pick up Med Kit: stocking up on heals early")
+        // …later the slot waits for a gun, unless you are low on health.
+        d=offer(health:100,after:200);expectFalse(d.intents.contains(.pickup("Med Kit")))
         expectEqual(d.reason,"Not picking up Med Kit: keeping free slots for missing guns")
-        d=offer(health:30);expectTrue(d.intents.contains(.pickup("Med Kit")));expectEqual(d.reason,"Pick up Med Kit: low on health")
+        d=offer(health:30,after:200);expectTrue(d.intents.contains(.pickup("Med Kit")));expectEqual(d.reason,"Pick up Med Kit: low on health")
     }
     @Test func testLowOnHealthDrinksBeforeOtherLoot() {
         func run(health:Double,shield:Double)->Decision {
@@ -828,7 +838,9 @@ struct AssistantCoreTests {
             return step(c,o)
         }
         let low=run(health:30,shield:20);expectTrue(low.intents.contains(.selectSlot(3)));expectFalse(low.intents.contains(.pickup("M4")))
-        let fine=run(health:70,shield:40);expectTrue(fine.intents.contains(.pickup("M4"))) // Otherwise loot still goes first.
+        // Any time below full health or shield, a heal worth drinking goes first…
+        let below=run(health:90,shield:60);expectTrue(below.intents.contains(.selectSlot(3)));expectFalse(below.intents.contains(.pickup("M4")))
+        let full=run(health:100,shield:100);expectTrue(full.intents.contains(.pickup("M4"))) // …at full, loot.
     }
     @Test func testPotionStacksFillToTheirSizeAndNoFurther() {
         var (c,o)=potionCarrier(.init(5,count:0),.init(6,itemID:"small_shield",count:4))
@@ -852,6 +864,57 @@ struct AssistantCoreTests {
         expectEqual(d.reason,"Not picking up Small Shield: its stack may be full, and the inventory is full")
         (c,o)=potionCarrier(.init(5,count:0),.init(6,itemID:"small_shield",count:1));o.prompt=potionPrompt(["Small Shield","x2","Potion"])
         d=step(c,o);expectTrue(d.intents.contains(.pickup("Small Shield"))) // With a free slot it lands there at worst.
+    }
+    @Test func testTierCGunsAreNotWorthASlot() {
+        let catalog=ItemCatalog.standard
+        expectEqual(catalog.model(id:"ump")?.tier,"S");expectEqual(catalog.model(id:"ak")?.tier,"A");expectEqual(catalog.model(id:"famas")?.tier,"B")
+        expectEqual(catalog.model(id:"glock")?.tier,"C");expectEqual(catalog.profile("shotgun:epic:ksg_shotgun")?.rankingTier,"C")
+        // Not picked up, even for a range with no gun yet.
+        for (name,subtitle) in [("Glock","Uncommon Pistol"),("P2000","Uncommon Pistol"),("KSG Shotgun","Epic Shotgun"),("Hunting Rifle","Epic Sniper")] {
+            let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+            var o=observation();o.selectedSlot=3
+            o.inventory=[.init(1,itemID:"fists"),.init(2,count:0),.init(3,itemID:"ar:rare:m4",ammo:30,reserveAmmo:90),.init(4,count:0),.init(5,count:0),.init(6,count:0)]
+            o.prompt=gunPrompt(name,subtitle);let d=step(c,o)
+            expectFalse(d.intents.contains(.pickup(name)));expectTrue(d.reason.hasSuffix("a tier C gun is not worth picking up"))
+        }
+        // One you carry is the first to go when a potion needs a slot.
+        let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+        var o=observation();o.selectedSlot=3
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"shotgun:epic:ksg_shotgun",ammo:6,reserveAmmo:12),.init(3,itemID:"ar:rare:m4",ammo:30,reserveAmmo:90),
+                     .init(4,itemID:"sniper:rare:bolt_mk2",ammo:5,reserveAmmo:10),.init(5,itemID:"hybrid_potion",count:2),.init(6,itemID:"small_shield",count:2)]
+        o.prompt=potionPrompt(["Big Shield","Potion"])
+        expectEqual(step(c,o).reason,"Select slot 2 to swap for Big Shield")
+    }
+    @Test func testTheRarerGunOfAClassIsUsed() {
+        // An Epic M4 in hand and a Legendary AK carried: the AK, though the M4 ranks higher.
+        let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+        var o=armed(0.2);o.selectedSlot=2
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"ar:epic:m4",ammo:30,reserveAmmo:90),.init(3,itemID:"ar:legendary:ak",ammo:30,reserveAmmo:90),
+                     .init(4,count:0),.init(5,count:0),.init(6,count:0)]
+        expectEqual(step(c,o).reason,"Select Legendary AK for medium range")
+        // With the AK's magazine empty in a fight, the loaded M4 beats reloading.
+        let d=Coordinator(catalog:.standard);d.features.idleWeapon=false
+        var p=armed(0.2);p.selectedSlot=3
+        p.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"ar:epic:m4",ammo:nil,reserveAmmo:nil),.init(3,itemID:"ar:legendary:ak",ammo:0,reserveAmmo:90),
+                     .init(4,count:0),.init(5,count:0),.init(6,count:0)]
+        expectEqual(step(d,p).reason,"Select Epic M4 for medium range")
+    }
+    @Test func testAPotionOnTheGroundIsDrunkFromABorrowedSlotAndTheGunTakenBack() {
+        // Half shield, a full inventory, a Big Shield on the ground: drink it, keep the potions you carry, take the gun back.
+        let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+        var o=observation();o.shield=50;o.selectedSlot=3
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"smg:rare:mp5",ammo:30,reserveAmmo:90),.init(3,itemID:"ar:rare:m4",ammo:30,reserveAmmo:90),
+                     .init(4,itemID:"sniper:rare:bolt_mk2",ammo:5,reserveAmmo:10),.init(5,itemID:"hybrid_potion",count:2),.init(6,itemID:"small_shield",count:2)]
+        _=step(c,o);o.timestamp=2.1;o.prompt=potionPrompt(["Big Shield","Potion"])
+        expectEqual(step(c,o).reason,"Select slot 4 to swap for Big Shield") // The gun you would miss least.
+        o.timestamp=2.15;o.selectedSlot=4;expectTrue(step(c,o).intents.contains(.pickup("Big Shield")))
+        o.timestamp=2.2;o.inventory[3] = .init(4,itemID:"large_shield");o.prompt=gunPrompt("Bolt Mk. II Sniper","Rare Sniper");_=step(c,o)
+        // The borrowed Big Shield is drunk, not the hybrids you carry…
+        o.timestamp=2.45;expectEqual(step(c,o).reason,"Start healing with Big Shield")
+        o.timestamp=7.6;o.shield=100;o.inventory[3] = .init(4,count:0);expectEqual(step(c,o).reason,"Healing confirmed")
+        // …and the sniper is picked up again.
+        o.timestamp=7.7;let back=step(c,o)
+        expectTrue(back.intents.contains(.pickup("Bolt Mk. II Sniper")));expectEqual(back.reason,"Pick up Bolt Mk. II Sniper again after healing")
     }
     @Test func testAStackSeenArrivingIsOneGroundStackUntilYouPressAKey() {
         // Slot 5 is seen empty, then holds a big shield you picked up: one ground stack, so room for one more.
@@ -1660,8 +1723,8 @@ struct AssistantCoreTests {
         // An AR takes a pistol's place, a sniper a DMR's.
         (c,o)=stocked("smg:rare:mp5","pistol:legendary:deagle","sniper:rare:bolt_mk2");o.prompt=gunPrompt("AK","Common AR")
         expectEqual(step(c,o).reason,"Select slot 3 to swap for AK")
-        (c,o)=stocked("smg:rare:mp5","ar:rare:m4","dmr:legendary");o.prompt=gunPrompt("Hunting Rifle","Common Sniper")
-        expectEqual(step(c,o).reason,"Select slot 4 to swap for Hunting Rifle")
+        (c,o)=stocked("smg:rare:mp5","ar:rare:m4","dmr:legendary");o.prompt=gunPrompt("Bolt-Action Sniper","Uncommon Sniper")
+        expectEqual(step(c,o).reason,"Select slot 4 to swap for Bolt-Action Sniper")
         // With no close-range gun yet, a shotgun is still welcome.
         (c,o)=kitted(nil,nil);o.inventory[3] = .init(4,count:0);o.prompt=gunPrompt("Pump Shotgun","Rare Shotgun")
         expectEqual(step(c,o).reason,"Pick up Rare Pump Shotgun for close range")

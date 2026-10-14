@@ -77,6 +77,8 @@ public struct WeaponModel: Codable, Equatable, Sendable {
 
     public static let rarityStep = 3.0
     public func power(_ rarity: Rarity) -> Double { Double(101 - rank) + Self.rarityStep * Double(rarity.rawValue - best.rawValue) }
+    /// The gun's tier in docs/WEAPONS.md, from its rank: S 1–6, A 7–20, B 21–34, C below. Tier C guns are not worth a slot.
+    public var tier: String { rank <= 6 ? "S" : rank <= 20 ? "A" : rank <= 34 ? "B" : "C" }
 }
 
 public struct HealSpec: Codable, Equatable, Sendable {
@@ -250,6 +252,7 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
             // A gun whose name is not recognized counts as an average one of its class.
             let average = spec.power.map { $0 + WeaponModel.rarityStep * Double(rarity.rawValue - Rarity.legendary.rawValue) }
             p.power = named.map { $0.power(rarity) } ?? average
+            p.rankingTier = named?.tier
             if let named, let average { p.edge = named.power(rarity) - average }
             return p
         }
