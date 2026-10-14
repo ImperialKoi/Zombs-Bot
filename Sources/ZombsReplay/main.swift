@@ -35,6 +35,7 @@ func run() throws {
             if case .pickup=intent { summary.pickupActions += 1 }
             if case .fire=intent { summary.fireActions += 1 }
             if case .fireAtPull=intent { summary.fireActions += 1 }
+            if case .fireHealing=intent { summary.fireActions += 1 }
             if case .throwAt=intent { summary.throwActions += 1 }
         }
         summary.frames += 1

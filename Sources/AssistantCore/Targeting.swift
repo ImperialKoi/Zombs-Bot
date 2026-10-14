@@ -63,9 +63,11 @@ public enum Targeting {
     }
 
     /// `weapon` is the gun in hand: its zoom sets the view scale, and its bullet speed is in that view's widths per second.
+    /// - Parameter friendly: the target is a teammate to heal (`Policy.validTeammate`), not an opponent.
     public static func intercept(_ target: PlayerTrack, in o: Observation, weapon: ItemProfile, now: Double,
-                                 settings: CombatSettings = .init()) -> Intercept? {
-        guard Policy.validEnemy(target, settings), let motion = target.motion, motion.isValid, o.player.isInViewport,
+                                 settings: CombatSettings = .init(), friendly: Bool = false) -> Intercept? {
+        guard friendly ? Policy.validTeammate(target, settings) : Policy.validEnemy(target, settings),
+              let motion = target.motion, motion.isValid, o.player.isInViewport,
               o.aspect.isFinite, o.aspect > 0, now.isFinite, o.timestamp.isFinite, now >= o.timestamp - 0.01,
               now - o.timestamp <= Policy.maxFrameAge, weapon.isValid, weapon.kind == .weapon else { return nil }
         let delay = max(0, now - o.timestamp) + settings.leadLatency

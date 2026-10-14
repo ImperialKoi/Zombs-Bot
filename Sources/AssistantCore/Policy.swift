@@ -126,17 +126,21 @@ public enum Policy {
             && !o.players.contains { Rect($0.position.x - 0.018, $0.position.y - 0.025, 0.036, 0.05).intersectsSegment(from: o.player, to: near) }
     }
     /// Whether throwing `item` (in hand, so the view is the default one) to `p` is safe and lands where clicked:
-    /// - only a pull or a blast, within its throw range, where a throw may be clicked (`throwClickable`: inside the
-    ///   grenade circle, away from the view's edges, off the HUD);
+    /// - only a pull, a blast or a Healing Grenade, within its throw range, where a throw may be clicked (`throwClickable`:
+    ///   inside the grenade circle, away from the view's edges, off the HUD);
     /// - nothing solid on the way, where it would stop, or bounce back at you (`clearShot`);
     /// - a blast lands farther than its radius plus `blastMargin` from you;
     /// - a pull lands at your feet, which leaves you in place, or out of reach of you, so it never drags you along
-    ///   (perhaps into your own blast), and it catches no teammate or player not known to be an enemy.
+    ///   (perhaps into your own blast), and it catches no teammate or player not known to be an enemy;
+    /// - a Healing Grenade may land anywhere, at your feet or a teammate's: only something solid on the way stops it, not
+    ///   something reported where you or they stand, which is a character misread.
     public static func throwSafe(_ o: Observation, item: ItemProfile, at p: Point, settings: CombatSettings) -> Bool {
-        guard item.kind == .throwable, let effect = item.effect, effect == .pull || effect == .blast, throwClickable(p, in: o, settings: settings)
-        else { return false }
+        guard item.kind == .throwable, let effect = item.effect, effect == .pull || effect == .blast || effect == .heal,
+              throwClickable(p, in: o, settings: settings) else { return false }
         let distance = p.distance(to: o.player, aspect: o.aspect)
-        guard distance <= item.throwRange, clearShot(o, at: p) else { return false }
+        guard distance <= item.throwRange else { return false }
+        if effect == .heal { return !solid(o, around: [p]).contains { $0.blocks(from: o.player, to: p) } }
+        guard clearShot(o, at: p) else { return false }
         if effect == .blast { return distance >= item.radius + blastMargin }
         guard distance <= feetRadius || distance >= item.radius + blastMargin else { return false }
         return !o.players.contains { $0.affiliation != .enemy && $0.position.distance(to: p, aspect: o.aspect) <= item.radius + blastMargin }
@@ -149,6 +153,90 @@ public enum Policy {
     public static func validEnemy(_ p: PlayerTrack, _ s: CombatSettings = .init()) -> Bool {
         p.affiliation == .enemy && p.confirmed && p.confidence >= s.minPlayerConfidence && p.affiliationConfidence >= s.minAffiliationConfidence
         && p.position.isInViewport && p.velocity.isFinite
+    }
+    /// A teammate to heal: confirmed, known by the tag above their head, in view.
+    public static func validTeammate(_ p: PlayerTrack, _ s: CombatSettings = .init()) -> Bool {
+        p.affiliation == .teammate && p.confirmed && p.confidence >= s.minPlayerConfidence && p.affiliationConfidence >= s.minAffiliationConfidence
+        && p.position.isInViewport && p.velocity.isFinite
+    }
+
+    // MARK: Healing Grenades and the Healing Gun
+
+    /// A throwable whose circle heals your team (the Healing Grenade).
+    public static func isHealGrenade(_ p: ItemProfile) -> Bool { p.kind == .throwable && p.effect == .heal && p.healthGain > 0 && p.overTime > 0 }
+    /// A weapon whose rounds heal whoever they hit instead of hurting them (the Healing Gun).
+    public static func isHealingGun(_ p: ItemProfile) -> Bool { p.kind == .weapon && p.healthGain > 0 }
+    /// Whether a round fired at `p` gets there: nothing on the way, not even a tree or rock, and no player but the one with
+    /// track `id`. A Healing Gun round heals whoever it reaches first, an opponent too.
+    public static func clearLine(_ o: Observation, to p: Point, except id: Int?) -> Bool {
+        p.isInViewport && !solid(o).contains { $0.blocks(from: o.player, to: p) }
+        && !o.players.contains { $0.id != id && Rect($0.position.x - 0.018, $0.position.y - 0.025, 0.036, 0.05).intersectsSegment(from: o.player, to: p) }
+    }
+    /// The obstacles that can be real: nobody stands inside a wall or a rock, so one reported where you stand (or at
+    /// `around`, where a teammate does) is a character misread. The detector does that now and then.
+    static func solid(_ o: Observation, around points: [Point] = []) -> [Obstacle] {
+        o.obstacles.filter { obstacle in !obstacle.cells.contains { cell in cell.contains(o.player) || points.contains { cell.contains($0) } } }
+    }
+    /// Your movement below this many view widths a second counts as standing still, which a bounced round needs: it comes
+    /// back to where you stood when it was fired.
+    public static let stillSpeed = 0.02
+    public static func standingStill(_ o: Observation) -> Bool {
+        o.ownVelocity.map { $0.isFinite && Point().distance(to: $0, aspect: o.aspect) <= stillSpeed } ?? false
+    }
+    /// How far a wall may be for a bounced round, in view widths: beyond the gun's muzzle, and near enough to come back.
+    public static let bounceRange = 0.045...0.15
+    /// Rays this far to either side of the shot must meet the same wall within `bounceTolerance` of its distance.
+    public static let bounceSpread = 0.02, bounceTolerance = 0.004
+    /// Where to aim the Healing Gun so its round bounces straight back to you: square at the nearest flat wall face along the
+    /// four screen axes (buildings stand square to the screen), within `bounceRange`, with nothing else on the way. A face
+    /// counts as flat and square to the shot when rays `bounceSpread` to either side meet the same wall at the same distance.
+    /// The point on the face; nil when no wall will do.
+    public static func bounceTarget(_ o: Observation) -> Point? {
+        guard o.player.isInViewport, o.aspect.isFinite, o.aspect > 0 else { return nil }
+        let walls = o.obstacles.filter { $0.kind == .wall }
+        guard !walls.isEmpty else { return nil }
+        var best: (distance: Double, point: Point)?
+        for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+            // `along` the axis and `across` it, both in view widths.
+            func at(_ along: Double, _ across: Double = 0) -> Point {
+                Point(o.player.x + dx * along - dy * across, o.player.y + (dy * along + dx * across) * o.aspect)
+            }
+            // The wall a ray `across` to the side enters first, and how far along.
+            func hit(_ across: Double) -> (wall: Int, distance: Double)? {
+                let origin = at(0, across)
+                var first: (wall: Int, distance: Double)?
+                for (index, wall) in walls.enumerated() {
+                    for cell in wall.cells {
+                        if let d = entry(cell, from: origin, dx: dx, dy: dy, aspect: o.aspect), d < first?.distance ?? .infinity { first = (index, d) }
+                    }
+                }
+                return first
+            }
+            guard let center = hit(0), bounceRange.contains(center.distance), center.distance < best?.distance ?? .infinity,
+                  let left = hit(-bounceSpread), let right = hit(bounceSpread), left.wall == center.wall, right.wall == center.wall,
+                  abs(left.distance - center.distance) <= bounceTolerance, abs(right.distance - center.distance) <= bounceTolerance
+            else { continue }
+            let short = at(center.distance - 0.012)
+            guard !solid(o).contains(where: { $0.kind != .wall && $0.blocks(from: o.player, to: short) }),
+                  !o.players.contains(where: { Rect($0.position.x - 0.018, $0.position.y - 0.025, 0.036, 0.05).intersectsSegment(from: o.player, to: short) })
+            else { continue }
+            best = (center.distance, at(center.distance))
+        }
+        return best?.point
+    }
+    /// How far, in view widths, a ray from `origin` along a screen axis goes before entering `rect`; 0 from inside it, nil
+    /// when it misses.
+    static func entry(_ rect: Rect, from origin: Point, dx: Double, dy: Double, aspect: Double) -> Double? {
+        if dy == 0 {
+            guard (rect.y...(rect.y + rect.height)).contains(origin.y) else { return nil }
+            let near = dx > 0 ? rect.x : rect.x + rect.width, far = dx > 0 ? rect.x + rect.width : rect.x
+            if (near - origin.x) * dx >= 0 { return (near - origin.x) * dx }
+            return (far - origin.x) * dx > 0 ? 0 : nil
+        }
+        guard (rect.x...(rect.x + rect.width)).contains(origin.x) else { return nil }
+        let near = dy > 0 ? rect.y : rect.y + rect.height, far = dy > 0 ? rect.y + rect.height : rect.y
+        if (near - origin.y) * dy >= 0 { return (near - origin.y) * dy / aspect }
+        return (far - origin.y) * dy > 0 ? 0 : nil
     }
     /// Any confirmed non-teammate in view and not behind a wall/door/chest. Unknown players count.
     public static func immediateThreat(_ o: Observation, _ s: CombatSettings = .init()) -> Bool {
@@ -228,9 +316,10 @@ public struct ActionGuard {
                 return predicted.distance(to: aim, aspect: o.aspect) <= 0.01
             }
         case .fireAtPull:
-            // Launchers and bows too, but never a weapon whose rounds bounce around before going off.
+            // Launchers and bows too, but never a weapon whose rounds bounce around before going off, nor one that heals.
             guard let selected = o.selected, selected.confidence >= 0.98, o.selectedSlotConfidence >= 0.98,
                   let item = selected.itemID.flatMap({ profiles[$0] }), item.verified, item.isValid, item.kind == .weapon, item.fuse == 0,
+                  !Policy.isHealingGun(item),
                   selected.hasAnyAmmo, (selected.ammo ?? 1) > 0, let aim, Policy.canFireToward(o, at: aim),
                   aim.distance(to: o.player, aspect: o.aspect) * item.zoom <= item.maxRange,
                   Policy.explosiveSafe(o, weapon: item, toward: aim, zoom: item.zoom) else { return false }
@@ -244,9 +333,26 @@ public struct ActionGuard {
             guard o.gunInHand != true, let selected = o.selected, selected.confidence >= 0.98, selected.count > 0, o.selectedSlotConfidence >= 0.98,
                   let item = selected.itemID.flatMap({ profiles[$0] }), item.verified, item.isValid,
                   Policy.throwSafe(o, item: item, at: p, settings: settings) else { return false }
+            if Policy.isHealGrenade(item) {
+                // Someone of your team inside its circle, you or a teammate, and no fight on: an opponent in the open gets a gun.
+                guard !Policy.immediateThreat(o, settings) else { return false }
+                return p.distance(to: o.player, aspect: o.aspect) <= item.radius
+                    || o.players.contains { Policy.validTeammate($0, settings) && $0.position.distance(to: p, aspect: o.aspect) <= item.radius }
+            }
             // Something to throw it at: an enemy near where it lands, or near enough for a pull to bring there.
             let reach = max(item.radius + 0.06, Policy.pullReach(profiles.values))
             return o.players.contains { Policy.validEnemy($0, settings) && $0.position.distance(to: p, aspect: o.aspect) <= reach }
+        case .fireHealing:
+            // Only the Healing Gun, and never with a fight on: an opponent in the open gets a real gun.
+            guard !Policy.immediateThreat(o, settings), let selected = o.selected, selected.confidence >= 0.98, o.selectedSlotConfidence >= 0.98,
+                  let item = selected.itemID.flatMap({ profiles[$0] }), item.verified, item.isValid, Policy.isHealingGun(item),
+                  selected.hasAnyAmmo, (selected.ammo ?? 1) > 0, let aim, aim.isInViewport else { return false }
+            // At a teammate: the aim leads one in range, and nobody else and nothing at all is on the way.
+            if let mate = o.players.first(where: { mate in
+                Targeting.intercept(mate, in: o, weapon: item, now: now, settings: settings, friendly: true).map { $0.point.distance(to: aim, aspect: o.aspect) <= 0.01 } ?? false
+            }) { return Policy.clearLine(o, to: aim, except: mate.id) }
+            // Or square at a wall that sends it straight back to you, while you stand still.
+            return Policy.standingStill(o) && (Policy.bounceTarget(o).map { $0.distance(to: aim, aspect: o.aspect) <= 0.003 } ?? false)
         case .useConsumable:
             // A readout showing rounds means a gun is in hand, whatever the slot is labeled: clicking would fire it.
             guard o.gunInHand != true, let selected = o.selected, selected.confidence >= 0.98, selected.count > 0, o.selectedSlotConfidence >= 0.98,

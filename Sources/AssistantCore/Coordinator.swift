@@ -103,6 +103,39 @@ public final class Coordinator {
     private var lastUserSlotChange = -Double.infinity
     /// A lethal grenade of yours on its way, and when it goes off; the app warns you to keep clear.
     public private(set) var liveGrenade: (name: String, explodes: Double)?
+    /// A heal with a Healing Grenade or the Healing Gun, for you or a teammate low on health (see `supportStep`).
+    private struct Support {
+        enum Use: String { case grenade, gun }
+        var use: Use
+        var slot: Int
+        var item: String
+        /// The teammate's track, roster name, and where and when they were last seen; no track heals you.
+        var target: Int?
+        var name: String?
+        var seen: Point?
+        var lastSeen: Double
+        var started: Double
+        /// When the grenade was thrown.
+        var thrown: Double?
+        /// The gun: when it last fired, its first round, and the patient's health with when it last rose.
+        var lastShot = -Double.infinity
+        var firstShot: Double?
+        var health: Double?
+        var lastRise: Double?
+        /// Since when the gun has waited for a clear line, a settled course, or you to stand still.
+        var waitingSince: Double?
+        var key: String { Self.key(use, name ?? target.map { "#\($0)" }) }
+        static func key(_ use: Use, _ who: String?) -> String { "\(use.rawValue)/\(who ?? "you")" }
+    }
+    private var support: Support?
+    /// Heals with a Healing Grenade or the Healing Gun that came to nothing, by `Support.key`, and when they may be tried again.
+    private var supportPaused: [String: Double] = [:]
+    /// Your Healing Grenades' circles on the ground, followed on screen: when each opens and closes, and whether it was thrown
+    /// for you.
+    private struct HealZone { var mark: GroundMark; var opens: Double; var closes: Double; var radius: Double; var rate: Double; var forYou: Bool }
+    private var zones: [HealZone] = []
+    /// Your own Healing Grenade's circle: seconds until it closes, and whether you stand in it. The app asks you to stay in it.
+    public private(set) var healCircle: (seconds: Double, inside: Bool)?
 
     public init(profiles: [ItemProfile], settings: CombatSettings = .init()) {
         self.profiles = Dictionary(profiles.filter(\.isValid).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -119,6 +152,7 @@ public final class Coordinator {
         band = nil; lastRangeSwitch = -.infinity; lastTargetSeen = -.infinity; healAttempts = []; healPausedUntil = -.infinity
         lastRequested = nil; lastSelection = nil; userChoiceUntil = -.infinity; lootNote = nil; lastIdleRequest = -.infinity
         combo = nil; lastCombo = -.infinity; lastUserSlotChange = -.infinity; liveGrenade = nil
+        support = nil; supportPaused = [:]; zones = []; healCircle = nil
     }
     /// A target missed for less than this keeps its distance band and identity.
     static let targetMemory = 1.0
@@ -132,11 +166,25 @@ public final class Coordinator {
     static let interactRetry = 0.6, interactTries = 3, interactBlock = 3.0
     /// The distance band chosen for the current target, for diagnostics.
     public var currentBand: WeaponRole? { band }
-    /// The healing item being selected or used, nil otherwise. The app asks you to stand still meanwhile.
+    /// The healing item being selected or used, nil otherwise: a potion, or the Healing Gun bounced off a wall back to you.
+    /// The app asks you to stand still meanwhile.
     public var healingItem: String? {
+        if let s = support, s.use == .gun, s.target == nil { return profiles[s.item]?.name ?? s.item }
         guard let id = heal?.item ?? healPlan else { return nil }
         return profiles[id]?.name ?? id
     }
+    /// A Healing Grenade or the Healing Gun heals someone below `CombatSettings.lowHealth`; both restore health only.
+    private func needsHealing(_ health: Double?) -> Bool { health.map { $0 < settings.lowHealth } ?? false }
+    /// Players this far inside a healing circle's edge count as in it.
+    static let zoneMargin = 0.02
+    /// A heal with a Healing Grenade or the Healing Gun gives up when the item has not come to hand after `supportStartLimit`,
+    /// after `supportLimit` in all, or after waiting `supportWait` for a clear line or for you to stand still; the gun also
+    /// gives up when its rounds have not raised anyone's health for `gunNoEffect`. A heal given up is not tried again for
+    /// `supportPause`.
+    static let supportStartLimit = 1.5, supportLimit = 10.0, supportWait = 3.0, gunNoEffect = 1.6, supportPause = 10.0
+    /// A Healing Grenade lands where a moving teammate will be this many seconds after the click: its circle opens about a
+    /// second later, but it is wide, and a teammate who sees it stops in it.
+    static let grenadeLead = 0.3
 
     private func profile(_ slot: InventorySlot) -> ItemProfile? {
         guard slot.confidence >= 0.98, let id = slot.itemID, let p = profiles[id], p.verified else { return nil }
@@ -203,10 +251,12 @@ public final class Coordinator {
 
     public func step(_ o: Observation, now t: Double) -> Decision {
         if let live = liveGrenade, t > live.explodes + 0.3 { liveGrenade = nil }
+        followZones(o, now: t)
         if let reason = Policy.haltReason(o, now: t) {
             pending = nil; heal = nil; healPlan = nil; recovery = nil; targetID = nil; lastThreat = t; priorWeaponSlot = nil; band = nil
             healAttempts = []; inHandSince = nil // A halted heal did not fail.
             if combo != nil { combo = nil; lastCombo = t } // What was thrown stays thrown; the rest is off.
+            support = nil
             // A slot you press while taking over shows as a change afterwards; a new match does not.
             if !o.manualOverride { lastSelection = nil }
             // A key you press yourself may have added to a stack or drunk from one.
@@ -264,8 +314,8 @@ public final class Coordinator {
         if !features.chests, let p = pending {
             switch p { case .opening, .holding: pending = nil; default: break } // Turning chests off lets go of E at once.
         }
-        if (heal != nil || healPlan != nil) && (!features.healing || threatened) {
-            heal = nil; healPlan = nil; pending = nil; healAttempts = []; inHandSince = nil
+        if (heal != nil || healPlan != nil || support != nil) && (!features.healing || threatened) {
+            heal = nil; healPlan = nil; pending = nil; healAttempts = []; inHandSince = nil; support = nil
             // Fight first: combat takes the weapon that suits the opponent's range.
             if threatened, features.combat, let decision = combat(o, now: t) { priorWeaponSlot = nil; return decision }
             if let i = priorWeaponSlot, let slot = o.slot(i), profile(slot)?.kind == .weapon {
@@ -324,8 +374,9 @@ public final class Coordinator {
                 if o.selectedSlot == slot && o.selectedSlotConfidence >= 0.98 && t >= settle { pending = nil }
                 else if t >= deadline { pending = nil; recovery = nil; cooldownUntil = t + 1; return idle(o.timestamp, "Slot selection timed out") }
                 // A slot switch on its way does not hold up a chest or an item for a free slot; while it brings a potion to
-                // you low on health, only another potion. A combo's switch is part of a fight.
-                else if !threatened, combo == nil, let decision = takeLoot(o, now: t, safeToHeal: safeToHeal, swapWait: "waiting for slot \(slot)",
+                // you low on health, only another potion. A combo's switch is part of a fight, and a Healing Grenade's or the
+                // Healing Gun's part of a heal that does not wait.
+                else if !threatened, combo == nil, support == nil, let decision = takeLoot(o, now: t, safeToHeal: safeToHeal, swapWait: "waiting for slot \(slot)",
                                                              potionsOnly: healPlan != nil && Policy.lowOnHealth(o, settings)) { return decision }
                 else { return idle(o.timestamp, "Waiting for selected slot") }
             case let .pickup(name, item, amount, before, deadline):
@@ -386,6 +437,8 @@ public final class Coordinator {
         }
         // An opponent in the open is engaged at once, without waiting out a settling period.
         if features.combat, let decision = combat(o, now: t) { return decision }
+        // A Healing Grenade or the Healing Gun for you or a teammate low on health: one throw or a few rounds, before loot.
+        if features.healing, !threatened, let decision = supportStep(o, now: t, safeToHeal: safeToHeal) { return decision }
         let swapWait = healPlan != nil ? "swapping once healed" : t < cooldownUntil ? "waiting for the game to settle" : nil
         // Low on health, a potion that helps comes first: picking one up, then drinking, then any other loot.
         if !threatened, Policy.lowOnHealth(o, settings) {
@@ -421,7 +474,7 @@ public final class Coordinator {
     /// With nothing going on, carry the long-range gun: most fights start at a distance. Waits for a quiet spell and a
     /// while after the last fight, and leaves a slot you picked yourself alone for `idleUserRespect`.
     private func idleWeapon(_ o: Observation, now t: Double) -> Decision? {
-        guard t >= userChoiceUntil, heal == nil, healPlan == nil, o.selectedSlotConfidence >= 0.98,
+        guard t >= userChoiceUntil, heal == nil, healPlan == nil, support == nil, o.selectedSlotConfidence >= 0.98,
               t - (lastThreat ?? t) >= settings.idleQuiet, t - lastPlayerSeen >= settings.idleQuiet,
               t - lastTargetSeen >= settings.idleAfterFight else { return nil }
         let best = o.inventory.compactMap { slot -> (slot: InventorySlot, item: ItemProfile, score: Double)? in
@@ -447,6 +500,7 @@ public final class Coordinator {
     /// Chooses a heal in a safe gap, then carries it through. A committed heal ignores the safe-gap rule, so
     /// stray detections cannot make the assistant flip between the healing item and the gun.
     private func healing(_ o: Observation, now t: Double, safeToHeal: Bool) -> Decision? {
+        guard support == nil else { return nil } // A Healing Grenade or the Healing Gun is in hand.
         if healPlan != nil {
             guard t >= healPausedUntil else { healPlan = nil; return nil }
             guard o.hudConfidence >= 0.98 else {
@@ -497,11 +551,11 @@ public final class Coordinator {
     }
 
     /// The first dose of the best heal plan, with the slot holding it: the selected slot when it holds that item.
-    /// Health and shield still arriving from a hybrid count as restored already.
+    /// Health and shield still arriving from a hybrid, or from a Healing Grenade's circle you stand in, count as restored already.
     func nextDose(_ o: Observation, now t: Double, continuing: Bool = false) -> (slot: InventorySlot, item: ItemProfile)? {
         guard o.hudConfidence >= 0.98, var health = o.health, var shield = o.shield else { return nil }
         let coming = arrivingTotal(at: t)
-        health = min(100, health + coming.health); shield = min(100, shield + coming.shield)
+        health = min(100, health + coming.health + zoneHealth(o, now: t)); shield = min(100, shield + coming.shield)
         let held = o.inventory.compactMap { slot -> (slot: InventorySlot, item: ItemProfile)? in
             guard let p = profile(slot), p.kind == .healing, slot.count > 0 else { return nil }
             // A hybrid drunk while the last one's health and shield are still arriving is wasted: the effect does not stack.
@@ -704,7 +758,8 @@ public final class Coordinator {
     /// one is over, so the fight goes on with guns. Each step checks again that it is still safe and still worth it.
     private func comboStep(_ o: Observation, now t: Double) -> Decision? {
         if combo == nil {
-            guard features.combos, heal == nil, healPlan == nil, t - lastCombo >= Combos.cooldown, o.selectedSlotConfidence >= 0.98 else { return nil }
+            guard features.combos, heal == nil, healPlan == nil, support == nil, t - lastCombo >= Combos.cooldown, o.selectedSlotConfidence >= 0.98
+            else { return nil }
             let enemies = o.players.filter { Policy.validEnemy($0, settings) && $0.motion != nil }
                 .sorted { $0.position.distance(to: o.player, aspect: o.aspect) < $1.position.distance(to: o.player, aspect: o.aspect) }
             guard let (target, plan) = enemies.prefix(3).lazy.compactMap({ e in self.comboPlans(o, on: e, now: t).first.map { (e, $0) } }).first
@@ -836,6 +891,192 @@ public final class Coordinator {
         }
     }
 
+    // MARK: Healing Grenades and the Healing Gun
+
+    /// Moves your Healing Grenades' circles with the view, forgets the closed ones, and updates `healCircle`.
+    private func followZones(_ o: Observation, now t: Double) {
+        zones.removeAll { t >= $0.closes }
+        for i in zones.indices { zones[i].mark.follow(o, zoom: viewZoom(o, keeping: zones[i].mark.zoom)) }
+        healCircle = zones.filter(\.forYou).max { $0.closes < $1.closes }.map { (max(0, $0.closes - t), covers($0, o.player, o)) }
+    }
+    private func covers(_ zone: HealZone, _ p: Point, _ o: Observation) -> Bool {
+        zone.mark.point.distance(to: p, aspect: o.aspect) <= zone.radius - Self.zoneMargin
+    }
+    /// Health your Healing Grenades' circles have still to give you, standing where you are.
+    private func zoneHealth(_ o: Observation, now t: Double) -> Double {
+        zones.filter { covers($0, o.player, o) }.reduce(0) { $0 + $1.rate * max(0, $1.closes - max(t, $1.opens)) }
+    }
+
+    /// The heal a Healing Grenade or the Healing Gun gives next, best first:
+    /// 1. a grenade at your feet when you are low on health, its circle taking in a low teammate beside you too;
+    /// 2. a grenade at the feet of a teammate low on health, where a throw can reach;
+    /// 3. the gun at a teammate low on health, in its range with a clear line;
+    /// 4. in a safe gap, when you are low on health, the gun square at a wall, which sends its rounds back to you.
+    /// Nobody in a circle of yours that still heals is healed again, and a heal that came to nothing waits `supportPause`.
+    private func supportPlan(_ o: Observation, now t: Double, safeToHeal: Bool) -> Support? {
+        guard o.hudConfidence >= 0.98, let health = o.health else { return nil }
+        let grenade = o.inventory.lazy.compactMap { slot -> (InventorySlot, ItemProfile)? in
+            guard let p = self.profile(slot), Policy.isHealGrenade(p), slot.count > 0 else { return nil }
+            return (slot, p)
+        }.first
+        let gun = o.inventory.lazy.compactMap { slot -> (InventorySlot, ItemProfile)? in
+            guard let p = self.profile(slot), Policy.isHealingGun(p), slot.hasAnyAmmo, (slot.ammo ?? 1) > 0 else { return nil }
+            return (slot, p)
+        }.first
+        guard grenade != nil || gun != nil else { return nil }
+        func paused(_ use: Support.Use, _ mate: PlayerTrack?) -> Bool {
+            t < supportPaused[Support.key(use, mate.map { $0.name ?? "#\($0.id)" })] ?? -.infinity
+        }
+        func plan(_ use: Support.Use, _ slot: InventorySlot, _ item: ItemProfile, for mate: PlayerTrack?) -> Support {
+            Support(use: use, slot: slot.index, item: item.id, target: mate?.id, name: mate?.name, seen: mate?.position, lastSeen: t, started: t,
+                    health: mate?.health ?? health)
+        }
+        let you = needsHealing(health) && !zones.contains { covers($0, o.player, o) }
+        let mates = o.players.filter { mate in
+            Policy.validTeammate(mate, settings) && needsHealing(mate.health) && !zones.contains { covers($0, mate.position, o) }
+        }.sorted { ($0.health ?? 100) < ($1.health ?? 100) }
+        if let (slot, item) = grenade {
+            if you, !paused(.grenade, nil) { return plan(.grenade, slot, item, for: nil) }
+            if let mate = mates.first(where: { !paused(.grenade, $0) && Policy.throwSafe(o, item: item, at: $0.position, settings: settings) }) {
+                return plan(.grenade, slot, item, for: mate)
+            }
+        }
+        if let (slot, item) = gun {
+            if let mate = mates.first(where: { !paused(.gun, $0) && $0.position.distance(to: o.player, aspect: o.aspect) <= item.maxRange
+                                               && Policy.clearLine(o, to: $0.position, except: $0.id) }) {
+                return plan(.gun, slot, item, for: mate)
+            }
+            if you, safeToHeal, !paused(.gun, nil), Policy.bounceTarget(o) != nil { return plan(.gun, slot, item, for: nil) }
+        }
+        return nil
+    }
+
+    /// Where a Healing Grenade lands: at the teammate's feet, where their motion will have carried them `grenadeLead` after the
+    /// click, or at yours. At yours it lands halfway to a teammate beside you who is low on health too, when its circle then
+    /// takes in you both; otherwise a step to one side, so the click has a direction.
+    private func grenadeSpot(_ o: Observation, _ item: ItemProfile, for mate: PlayerTrack?, now t: Double) -> Point? {
+        func safe(_ p: Point) -> Point? { Policy.throwSafe(o, item: item, at: p, settings: settings) ? p : nil }
+        if let mate {
+            return safe(Combos.predicted(mate, in: o, after: settings.leadLatency + Self.grenadeLead, now: t, settings: settings)) ?? safe(mate.position)
+        }
+        let reach = item.radius - Self.zoneMargin
+        if let buddy = o.players.first(where: { Policy.validTeammate($0, settings) && needsHealing($0.health)
+                                                && $0.position.distance(to: o.player, aspect: o.aspect) <= 2 * reach - 0.01 }),
+           let spot = safe(o.player + (buddy.position - o.player) * 0.5) { return spot }
+        for (dx, dy) in [(0.0, -1.0), (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0)] {
+            if let spot = safe(Point(o.player.x + dx * Combos.feetOffset, o.player.y + dy * Combos.feetOffset * o.aspect)) { return spot }
+        }
+        return nil
+    }
+
+    /// Starts or carries on a heal with a Healing Grenade or the Healing Gun (see `supportPlan`); nil when none is under way or
+    /// due, and once one is over. A grenade is selected and thrown once. The gun fires a round at a time, leading a moving
+    /// teammate, or square at a wall while you stand still, until the patient is within one round of full health; rounds
+    /// that raise nobody's health end it. Combat comes first: an opponent in the open or a hit ends any of it at once.
+    private func supportStep(_ o: Observation, now t: Double, safeToHeal: Bool) -> Decision? {
+        if support == nil {
+            guard heal == nil, healPlan == nil, combo == nil, o.selectedSlotConfidence >= 0.98,
+                  let plan = supportPlan(o, now: t, safeToHeal: safeToHeal) else { return nil }
+            support = plan
+        }
+        guard var s = support, let item = profiles[s.item] else { support = nil; return nil }
+        /// Ends the heal; `pause` keeps it from being tried again at once.
+        func end(_ reason: String?, pause: Bool = false) -> Decision? {
+            if pause { supportPaused[s.key] = t + Self.supportPause }
+            support = nil
+            return reason.map { idle(o.timestamp, $0) }
+        }
+        // The teammate: their track, else the teammate of that name, else one right where they were (tracks are lost and found).
+        var mate: PlayerTrack?
+        if s.target != nil {
+            let mates = o.players.filter { Policy.validTeammate($0, settings) }
+            mate = mates.first { $0.id == s.target } ?? s.name.flatMap { name in mates.first { $0.name == name } }
+                ?? s.seen.flatMap { seen in
+                    mates.min { $0.position.distance(to: seen, aspect: o.aspect) < $1.position.distance(to: seen, aspect: o.aspect) }
+                        .flatMap { $0.position.distance(to: seen, aspect: o.aspect) <= 0.06 ? $0 : nil }
+                }
+            if let mate { s.target = mate.id; s.name = mate.name ?? s.name; s.seen = mate.position; s.lastSeen = t }
+            else if t - s.lastSeen > 0.5 { return end(s.thrown == nil ? "Heal stopped: lost sight of \(s.name ?? "your teammate")" : nil) }
+        }
+        support = s
+        let who = s.target == nil ? "you" : s.name ?? "your teammate"
+        if lastUserSlotChange > s.started { return end("Heal stopped: you changed slots") }
+        if t - s.started > Self.supportLimit { return end("Heal stopped: it took too long", pause: true) }
+        /// The slot still holds the item, ready; selects it when it is not in hand yet.
+        func take(_ reason: String) -> Decision? {
+            guard let slot = o.slot(s.slot), profile(slot)?.id == item.id,
+                  item.kind == .weapon ? slot.hasAnyAmmo && (slot.ammo ?? 1) > 0 : slot.count > 0
+            else { return end("Heal stopped: \(item.name) is not ready in slot \(s.slot)") }
+            if o.selectedSlot != slot.index {
+                guard t - s.started <= Self.supportStartLimit else { return end("Heal stopped: \(item.name) never came to hand", pause: true) }
+                if let current = o.selected, profile(current).map({ $0.kind == .weapon && $0.role != nil }) ?? false { priorWeaponSlot = current.index }
+                return select(slot, in: o, now: t, reason: reason)
+            }
+            // A readout showing rounds means a gun is in hand: a grenade's click would fire it.
+            if item.kind == .throwable && o.gunInHand == true { return end("Heal stopped: slot \(slot.index) holds a gun, not \(item.name)", pause: true) }
+            return nil
+        }
+
+        switch s.use {
+        case .grenade:
+            if let thrown = s.thrown {
+                // The click is let go where it was made; the gun comes back after that.
+                return t - thrown < Combos.throwHold ? Decision(o.timestamp, [], "Throwing \(item.name)") : end(nil)
+            }
+            if let decision = take(s.target == nil ? "Select \(item.name) to heal you" : "Select \(item.name) to heal \(who)") { return decision }
+            guard let spot = grenadeSpot(o, item, for: mate, now: t) else { return end("Heal stopped: nowhere clear to throw \(item.name) for \(who)", pause: true) }
+            s.thrown = t; support = s
+            usedOne(s.slot, item.id)
+            let opens = t + settings.leadLatency + item.fuse
+            zones.append(HealZone(mark: GroundMark(spot, zoom: viewZoom(o, keeping: 1), time: o.timestamp), opens: opens, closes: opens + item.overTime,
+                                  radius: item.radius, rate: item.healthGain / item.overTime,
+                                  forYou: spot.distance(to: o.player, aspect: o.aspect) <= item.radius - Self.zoneMargin))
+            let health = s.target == nil ? o.health : mate?.health
+            return Decision(o.timestamp, [.releaseAll, .throwAt(spot)],
+                            "\(item.name) at \(s.target == nil ? "your" : "\(who)'s") feet" + (health.map { ": health \(Int($0))" } ?? ""))
+        case .gun:
+            // The patient's health: yours, or the teammate's off their roster row (the last reading while it is unreadable).
+            let reading = s.target == nil ? (o.hudConfidence >= 0.98 ? o.health : nil) : mate?.health
+            guard let health = reading ?? s.health else { return end("Heal stopped: \(who)'s health is not readable") }
+            if health > 100 - item.healthGain { return end(s.firstShot == nil ? nil : s.target == nil ? "Healed with the \(item.name)" : "Healed \(who) with the \(item.name)") }
+            if let last = s.health, health > last + 1 { s.lastRise = t }
+            s.health = health; support = s
+            if let first = s.firstShot, t - (s.lastRise ?? first) > Self.gunNoEffect {
+                return end(s.target == nil ? "\(item.name) rounds off the wall are not reaching you; not trying again for \(Int(Self.supportPause)) s"
+                                           : "\(item.name) rounds are not reaching \(who); not trying again for \(Int(Self.supportPause)) s", pause: true)
+            }
+            if let decision = take(s.target == nil ? "Select \(item.name) to heal you off a wall" : "Select \(item.name) to heal \(who)") { return decision }
+            /// Aims and waits, for up to `supportWait`.
+            func wait(_ reason: String, aim: Point?) -> Decision? {
+                let since = s.waitingSince ?? t; s.waitingSince = since; support = s
+                if t - since > Self.supportWait { return end("Heal stopped: \(reason.prefix(1).lowercased() + reason.dropFirst())", pause: true) }
+                return Decision(o.timestamp, [.releaseAll] + (aim.map { [InputIntent.aim($0)] } ?? []), reason)
+            }
+            let aim: Point
+            if let mate {
+                guard let intercept = Targeting.intercept(mate, in: o, weapon: item, now: t, settings: settings, friendly: true) else {
+                    return wait("\(who) is out of the \(item.name)'s range", aim: nil)
+                }
+                guard Policy.clearLine(o, to: intercept.point, except: mate.id) else { return wait("No clear line to \(who)", aim: intercept.point) }
+                guard intercept.hitProbability >= item.minHitProbability ?? Policy.minHitProbability else {
+                    return wait("\(who)'s course is still uncertain", aim: intercept.point)
+                }
+                aim = intercept.point
+            } else if s.target != nil {
+                return Decision(o.timestamp, [.releaseAll], "Looking for \(who)")
+            } else {
+                guard let wall = Policy.bounceTarget(o) else { return end("Heal stopped: no wall to bounce the \(item.name) off", pause: true) }
+                guard Policy.standingStill(o) else { return wait("Stand still: the \(item.name) bounces off the wall back to you", aim: wall) }
+                aim = wall
+            }
+            s.waitingSince = nil; support = s
+            if t - s.lastShot < item.shotInterval { return Decision(o.timestamp, [.releaseAll, .aim(aim)], "\(item.name): next round") }
+            s.lastShot = t; s.firstShot = s.firstShot ?? t; support = s
+            return Decision(o.timestamp, [.aim(aim), .fireHealing],
+                            s.target == nil ? "\(item.name) off the wall to heal you: health \(Int(health))" : "\(item.name) at \(who): health \(Int(health))")
+        }
+    }
+
     /// Opening a chest or taking an item is one key press, and the loot stays behind once you walk on, so it comes before
     /// heals and settling times: it never changes the selected slot. A swap into a full inventory does change it (the game
     /// swaps out the selected item), so it waits while `swapWait` says why.
@@ -898,6 +1139,8 @@ public final class Coordinator {
         let empty = slots.filter(\.isKnownEmpty)
         let weapons = slots.filter { profile($0).map { $0.kind == .weapon && $0.role != nil } ?? false }
         let heals = slots.filter { profile($0)?.kind == .healing }
+        // The Healing Gun takes one of the slots kept for heals, but it is yours to manage and never makes way.
+        let healingGuns = slots.filter { profile($0).map(Policy.isHealingGun) ?? false }
         // Utility items, the one the loadout keeps first.
         let utility = slots.filter { profile($0).map(Self.isUtility) ?? false }.sorted { Self.value(profile($0)!) > Self.value(profile($1)!) }
         let missingRoles = WeaponRole.allCases.filter { role in !weapons.contains { profile($0)?.role == role } }
@@ -921,7 +1164,7 @@ public final class Coordinator {
             if let victim = spare.first {
                 return take(replacing: victim, "Pick up \(incoming.name) for \(role.rawValue) range in place of \(name(victim))")
             }
-            if heals.count + utility.count > settings.minHealSlots,
+            if heals.count + healingGuns.count + utility.count > settings.minHealSlots,
                let victim = heals.count > 1 ? heals.min(by: { Policy.healingBenefit(profile($0)!, in: o) < Policy.healingBenefit(profile($1)!, in: o) }) : utility.last {
                 return take(replacing: victim, "Pick up \(incoming.name) for \(role.rawValue) range in place of \(name(victim))")
             }

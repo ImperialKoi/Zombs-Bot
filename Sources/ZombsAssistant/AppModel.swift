@@ -30,6 +30,8 @@ struct FrameReport {
     var healing: String?
     /// A lethal grenade the assistant threw, and the seconds until it goes off; you are warned to keep clear.
     var grenade: (name: String, seconds: Double)?
+    /// A Healing Grenade the assistant threw at your feet: seconds it still heals, and whether you stand in its circle.
+    var healCircle: (seconds: Double, inside: Bool)?
     /// The grenade circle's radius in view heights, drawn on the preview.
     var throwRadius: Double
 }
@@ -94,7 +96,8 @@ final class ProcessingPipeline {
                                  band:coordinator.currentBand,fps:performance.fps,latency:performance.p95,performancePasses:performance.passes(minimumFPS:PerformanceWindow.betaMinimumFPS),focusProblem:focusProblem,
                                  windowBounds:frame.windowBounds,contentRect:frame.contentRect,
                                  hudMilliseconds:result.hudMilliseconds,detectorMilliseconds:result.detectorMilliseconds,healing:coordinator.healingItem,
-                                 grenade:coordinator.liveGrenade.map { ($0.name,max(0,$0.explodes-now)) },throwRadius:coordinator.settings.throwRadius))
+                                 grenade:coordinator.liveGrenade.map { ($0.name,max(0,$0.explodes-now)) },healCircle:coordinator.healCircle,
+                                 throwRadius:coordinator.settings.throwRadius))
         }
     }
 }
@@ -225,6 +228,10 @@ final class AppModel:ObservableObject {
         } else if inputState == .active, let grenade=report.grenade {
             healPrompt.show(title:"GRENADE OUT",detail:String(format:"Keep clear: %@ goes off in %.1f s",grenade.name,grenade.seconds),color:.red,
                             windowBounds:report.windowBounds,contentRect:report.contentRect)
+        } else if inputState == .active, let circle=report.healCircle {
+            // A Healing Grenade's circle heals only who stands in it.
+            healPrompt.show(title:circle.inside ? "STAY IN THE CIRCLE" : "BACK INTO THE CIRCLE",detail:String(format:"Healing Grenade heals you for %.1f s more",circle.seconds),
+                            color:.green,windowBounds:report.windowBounds,contentRect:report.contentRect)
         } else { healPrompt.hide() }
         let title:String, color:Color, detail:String
         switch inputState {

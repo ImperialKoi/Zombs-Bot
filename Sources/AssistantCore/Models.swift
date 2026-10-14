@@ -14,7 +14,9 @@ public enum ThrowableEffect: String, Codable, CaseIterable, Sendable {
     case push
     /// Explodes where it landed, hurting everyone near it, you included, though not your teammates (Frag, RGD-5).
     case blast
-    /// Anything else: smoke, freezing, snowmen, healing, gas or fire, bombs that stick or burst into thorns.
+    /// Heals you and your teammates inside a circle where it landed, for a few seconds; never opponents (Healing Grenade).
+    case heal
+    /// Anything else: smoke, freezing, snowmen, gas or fire, bombs that stick or burst into thorns.
     case other
 }
 
@@ -35,6 +37,8 @@ public struct ItemProfile: Codable, Equatable, Sendable {
     public var projectileSpeed: Double = 0 // viewport widths / second; 0 means frame-age compensation only
     public var minRange: Double = 0
     public var maxRange: Double = 0.75
+    /// Consumables: health one dose restores. A Healing Grenade: health it restores to someone inside its circle the whole
+    /// time. A weapon: health each round restores to whoever it hits (the Healing Gun).
     public var healthGain: Double = 0
     public var shieldGain: Double = 0
     public var healthCap: Double = 100
@@ -42,7 +46,8 @@ public struct ItemProfile: Codable, Equatable, Sendable {
     public var useDuration: Double = 0
     /// Health/shield points a consumable is worth keeping for later; a dose must restore more than this to be used.
     public var keepValue: Double = 0
-    /// Seconds over which a consumable's gains arrive after the drink; 0 means at once.
+    /// Seconds over which a consumable's gains arrive after the drink, or a Healing Grenade's circle heals once it opens;
+    /// 0 means at once.
     public var overTime: Double = 0
     /// Most a slot holds of this consumable, and how many one ground stack holds; nil when not known.
     public var maxStack: Int?
@@ -63,10 +68,10 @@ public struct ItemProfile: Codable, Equatable, Sendable {
     public var edge: Double = 0
     /// Throwables: what one does where it lands; nil for items that are never thrown on purpose.
     public var effect: ThrowableEffect?
-    /// Throwables: seconds from the throw until it goes off. Weapons: seconds until a round goes off for rounds that
-    /// bounce around first (the Grenade Launcher's); such a weapon is never fired automatically.
+    /// Throwables: seconds from the throw until it goes off (a Healing Grenade's circle opens). Weapons: seconds until a
+    /// round goes off for rounds that bounce around first (the Grenade Launcher's); such a weapon is never fired automatically.
     public var fuse: Double = 0
-    /// In the default view's widths. A throwable's blast or pull reaches this far from where it lands. A weapon's round
+    /// In the default view's widths. A throwable's blast, pull or healing circle reaches this far from where it lands. A weapon's round
     /// that explodes (the RPG's, the Gift Launcher's, every sixth of the Assault SCAR's) hurts everyone this close to
     /// where it hits, you included. 0: no explosion.
     public var radius: Double = 0
@@ -181,10 +186,17 @@ public struct PlayerTrack: Codable, Equatable, Sendable {
     public var confirmed: Bool
     /// Not detected in this frame: the position is the motion filter's prediction for a briefly missed player.
     public var predicted: Bool
+    /// A teammate's roster name, as the tag above their head matched it.
+    public var name: String?
+    /// A teammate's health and shield, read off their roster row; nil when unknown, or while they are knocked down.
+    public var health: Double?
+    public var shield: Double?
     public init(id: Int, position: Point, velocity: Point = .init(), affiliation: Affiliation = .unknown, confidence: Double = 1,
-                affiliationConfidence: Double = 1, motion: MotionEstimate? = nil, confirmed: Bool = true, predicted: Bool = false) {
+                affiliationConfidence: Double = 1, motion: MotionEstimate? = nil, confirmed: Bool = true, predicted: Bool = false,
+                name: String? = nil, health: Double? = nil, shield: Double? = nil) {
         self.id = id; self.position = position; self.velocity = velocity; self.affiliation = affiliation; self.confidence = confidence
         self.affiliationConfidence = affiliationConfidence; self.motion = motion; self.confirmed = confirmed; self.predicted = predicted
+        self.name = name; self.health = health; self.shield = shield
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -196,6 +208,22 @@ public struct PlayerTrack: Codable, Equatable, Sendable {
         motion = try c.decodeIfPresent(MotionEstimate.self, forKey: .motion)
         confirmed = try c.decodeIfPresent(Bool.self, forKey: .confirmed) ?? true
         predicted = try c.decodeIfPresent(Bool.self, forKey: .predicted) ?? false
+        name = try c.decodeIfPresent(String.self, forKey: .name)
+        health = try c.decodeIfPresent(Double.self, forKey: .health)
+        shield = try c.decodeIfPresent(Double.self, forKey: .shield)
+    }
+}
+
+/// A teammate's row in the roster above your name: their name over a thin shield bar and a health bar. The health bar is
+/// green while they are up and red while they are knocked down, bleeding out until someone revives them.
+public struct TeammateStatus: Codable, Equatable, Sendable {
+    /// The roster name, once text recognition has read it.
+    public var name: String?
+    public var down: Bool
+    public var health: Double
+    public var shield: Double
+    public init(name: String?, down: Bool = false, health: Double, shield: Double) {
+        self.name = name; self.down = down; self.health = health; self.shield = shield
     }
 }
 
@@ -213,6 +241,8 @@ public struct Obstacle: Codable, Equatable, Sendable {
         guard kind != .reviveTarget else { return false }
         return (maskCells.isEmpty ? [bounds] : maskCells).contains { $0.intersectsSegment(from: from, to: to, padding: 0.008) }
     }
+    /// The occupied rectangles: the mask's, else the bounds.
+    public var cells: [Rect] { maskCells.isEmpty ? [bounds] : maskCells }
     /// Foliage and rocks still intercept bullets, but the user wants to fire at enemies behind them.
     public var preventsEngagement: Bool { kind != .tree && kind != .rock }
 }
@@ -282,6 +312,8 @@ public struct Observation: Codable, Equatable, Sendable {
     /// True when the ammunition readout shows rounds (a gun is in hand), false when it was read and shows none, nil when unknown.
     public var gunInHand: Bool?
     public var healingProgress: Double?
+    /// Your teammates' roster rows, top to bottom; empty in Solo.
+    public var squad: [TeammateStatus] = []
     public var manualOverride: Bool = false
     public var captureHealthy: Bool = true
     public init(timestamp: Double) { self.timestamp = timestamp }
@@ -313,6 +345,7 @@ public struct Observation: Codable, Equatable, Sendable {
         promptVisible = try c.decodeIfPresent(Bool.self, forKey: .promptVisible) ?? (prompt != nil)
         gunInHand = try c.decodeIfPresent(Bool.self, forKey: .gunInHand)
         healingProgress = try c.decodeIfPresent(Double.self, forKey: .healingProgress)
+        squad = try c.decodeIfPresent([TeammateStatus].self, forKey: .squad) ?? []
         manualOverride = try c.decodeIfPresent(Bool.self, forKey: .manualOverride) ?? false
         captureHealthy = try c.decodeIfPresent(Bool.self, forKey: .captureHealthy) ?? true
     }
@@ -349,6 +382,8 @@ public enum InputIntent: Codable, Equatable, Sendable {
     /// Fire along the aim at the spot a pull grenade is bringing an opponent to (see `Combos`). Unlike `fire`, the
     /// opponent may still be on the way there.
     case fireAtPull
+    /// Fire the Healing Gun along the aim: at a teammate, or square at a wall that bounces the round back to you.
+    case fireHealing
     case releaseAll
 }
 

@@ -129,9 +129,9 @@ public enum Combos {
 
     /// How a gun finishes a combo, best first: a rocket or present burst, then one big shot (XBow, crossbow, sniper,
     /// DMR), then any other gun, which is only worth it on an opponent behind cover. Never a gun whose rounds bounce around
-    /// first, and a shotgun only right at your feet (`closeRank`).
+    /// first or heal (the Healing Gun), and a shotgun only right at your feet (`closeRank`).
     static func gunRank(_ p: ItemProfile) -> Double? {
-        guard p.kind == .weapon, p.fuse == 0, let c = p.weaponClass else { return nil }
+        guard p.kind == .weapon, p.fuse == 0, !Policy.isHealingGun(p), let c = p.weaponClass else { return nil }
         switch c {
         case .launcher: return 1
         case .special, .sniper, .dmr: return 2

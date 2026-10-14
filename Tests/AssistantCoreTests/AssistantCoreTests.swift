@@ -1733,6 +1733,229 @@ struct AssistantCoreTests {
         o.timestamp=0.3;mark.follow(o,zoom:1.2)
         #expect(abs(mark.point.x-(0.5+0.17/1.2))<1e-12)
     }
+
+    // MARK: Healing Grenades and the Healing Gun
+    /// A Duo match with catalog items: a Rare M4 in slot 2, in hand, the given items in slots 3 to 6 (grenades in threes, the
+    /// Healing Gun with 8 rounds, as its slot prints them; in hand its readout shows a bare "8", like a grenade's), and you
+    /// on the given health with no shield. Nobody else in view unless a test adds them.
+    func medic(_ items:[String?],health:Double=30)->(Coordinator,Observation) {
+        let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+        var o=observation();o.mode = .duo;o.teamMode=true;o.health=health;o.shield=0
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"ar:rare:m4",ammo:30,reserveAmmo:90)]+items.enumerated().map { i,id in
+            guard let id else { return InventorySlot(i+3,count:0) }
+            return ItemCatalog.parseWeaponID(id) != nil ? InventorySlot(i+3,itemID:id,totalAmmo:8) : InventorySlot(i+3,itemID:id,count:3)
+        }
+        return (c,o)
+    }
+    /// Your teammate, standing still, with the health their roster row shows.
+    func teammate(_ position:Point,health:Double?,id:Int=7)->PlayerTrack {
+        .init(id:id,position:position,affiliation:.teammate,motion:.init(groundVelocity:Point()),name:"Chris_Hansen",health:health,shield:0)
+    }
+    @Test func testAHealingGrenadeLandsAtYourFeetWhenYouAreLow() throws {
+        var (c,o)=medic(["healing_grenade","medkit",nil,nil])
+        let guardrail=ActionGuard(profiles:c.profiles)
+        let select=step(c,o)
+        expectEqual(select.intents,[.releaseAll,.selectSlot(3)]);expectEqual(select.reason,"Select Healing Grenade to heal you")
+        o.timestamp=0.05;o.selectedSlot=3;expectEqual(step(c,o).reason,"Waiting for selected slot")
+        o.timestamp=0.3;let throwing=step(c,o)
+        let spot=try #require(thrown(throwing))
+        expectEqual(throwing.reason,"Healing Grenade at your feet: health 30")
+        #expect(spot.distance(to:o.player,aspect:o.aspect) <= Combos.feetOffset+1e-9)
+        expectTrue(guardrail.permits(.throwAt(spot),observation:o,now:0.3,aim:nil))
+        o.timestamp=0.35;expectEqual(step(c,o).intents,[]) // The click goes up where it was made.
+        // The M4 comes back, and the app asks you to stay in the circle while it heals.
+        o.timestamp=0.5;expectEqual(step(c,o).intents,[.releaseAll,.selectSlot(2)])
+        expectEqual(c.healCircle?.inside,true)
+        // Nothing more for your health while the circle heals you, about 20 a second once it opens: no second grenade, no
+        // Med Kit.
+        o.timestamp=0.55;o.selectedSlot=2;_=step(c,o)
+        for (time,health) in [(1.0,30.0),(2.6,51.0)] { o.timestamp=time;o.health=health;assertRelease(step(c,o)) }
+        // You walked out of it: the app says so, and what it did not heal is the Med Kit's.
+        o.timestamp=2.7;o.sceneryShift=Point(-0.2,0)
+        expectEqual(step(c,o).reason,"Select Med Kit to heal")
+        expectEqual(c.healCircle?.inside,false)
+        o.sceneryShift=nil;o.timestamp=6.2;_=step(c,o)
+        #expect(c.healCircle == nil) // Closed.
+    }
+    @Test func testHealingGrenadesWaitForRealNeedAndNoFight() {
+        // 60 health is not low: the grenade is kept.
+        var (c,o)=medic(["healing_grenade",nil,nil,nil],health:60)
+        expectFalse(step(c,o).intents.contains(.selectSlot(3)))
+        // An opponent in the open gets the M4 first, and the guard refuses a heal throw while one is there.
+        (c,o)=medic(["healing_grenade",nil,nil,nil]);o.players=[enemy()]
+        expectTrue(step(c,o).intents.contains(.fire))
+        o.selectedSlot=3
+        expectFalse(ActionGuard(profiles:c.profiles).permits(.throwAt(Point(0.5,0.47)),observation:o,now:0,aim:nil))
+        // Nor anywhere nobody of your team is.
+        o.players=[];o.health=100
+        expectFalse(ActionGuard(profiles:c.profiles).permits(.throwAt(Point(0.7,0.5)),observation:o,now:0,aim:nil))
+        expectTrue(ActionGuard(profiles:c.profiles).permits(.throwAt(Point(0.55,0.5)),observation:o,now:0,aim:nil))
+        // A grenade in hand is never clicked while the readout shows rounds.
+        o.gunInHand=true
+        expectFalse(ActionGuard(profiles:c.profiles).permits(.throwAt(Point(0.55,0.5)),observation:o,now:0,aim:nil))
+    }
+    @Test func testAHealingGrenadeLandsAtALowTeammatesFeet() throws {
+        var (c,o)=medic(["healing_grenade",nil,nil,nil],health:100)
+        o.players=[teammate(Point(0.62,0.55),health:30)]
+        expectEqual(step(c,o).reason,"Select Healing Grenade to heal Chris_Hansen")
+        o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
+        o.timestamp=0.3;let throwing=step(c,o)
+        let spot=try #require(thrown(throwing))
+        expectEqual(throwing.reason,"Healing Grenade at Chris_Hansen's feet: health 30")
+        #expect(spot.distance(to:Point(0.62,0.55),aspect:o.aspect) < 1e-9)
+        expectTrue(ActionGuard(profiles:c.profiles).permits(.throwAt(spot),observation:o,now:0.3,aim:nil))
+        #expect(c.healCircle == nil) // Thrown for them, not for you.
+        // No second one while their circle heals them.
+        o.timestamp=0.45;_=step(c,o);o.timestamp=0.6;o.selectedSlot=2
+        expectFalse(step(c,o).intents.contains(.selectSlot(3)))
+        // A teammate with health left, or out of throwing reach, gets none.
+        for (position,health) in [(Point(0.62,0.55),80.0),(Point(0.95,0.5),30.0)] {
+            (c,o)=medic(["healing_grenade",nil,nil,nil],health:100);o.players=[teammate(position,health:health)]
+            expectFalse(step(c,o).intents.contains(.selectSlot(3)))
+        }
+        // Low beside you, when you are low too: halfway between, so the circle takes you both.
+        (c,o)=medic(["healing_grenade",nil,nil,nil]);o.players=[teammate(Point(0.56,0.5),health:40)]
+        _=step(c,o);o.timestamp=0.05;o.selectedSlot=3;_=step(c,o);o.timestamp=0.3
+        let shared=try #require(thrown(step(c,o)))
+        #expect(abs(shared.x-0.53)<1e-9 && abs(shared.y-0.5)<1e-9)
+    }
+    @Test func testTheHealingGunHealsALowTeammateUntilNearlyFull() {
+        var (c,o)=medic(["special:epic:healing_gun",nil,nil,nil],health:100)
+        var mate=teammate(Point(0.62,0.5),health:30);o.players=[mate]
+        let guardrail=ActionGuard(profiles:c.profiles)
+        expectEqual(step(c,o).intents,[.releaseAll,.selectSlot(3)])
+        o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
+        o.timestamp=0.4;let shot=step(c,o)
+        expectEqual(shot.intents,[.aim(Point(0.62,0.5)),.fireHealing]);expectEqual(shot.reason,"Epic Healing Gun at Chris_Hansen: health 30")
+        expectTrue(guardrail.permits(.fireHealing,observation:o,now:0.4,aim:Point(0.62,0.5)))
+        // One round at a time.
+        o.timestamp=0.5;expectEqual(step(c,o).intents,[.releaseAll,.aim(Point(0.62,0.5))])
+        mate.health=42;o.players=[mate];o.timestamp=0.95;expectTrue(step(c,o).intents.contains(.fireHealing))
+        // Within a round of full health it stops, and the M4 comes back.
+        mate.health=90;o.players=[mate];o.timestamp=1.5;expectEqual(step(c,o).reason,"Healed Chris_Hansen with the Epic Healing Gun")
+        o.timestamp=1.6;expectEqual(step(c,o).intents,[.releaseAll,.selectSlot(2)])
+    }
+    @Test func testHealingGunRoundsThatHealNobodyEndTheHeal() {
+        var (c,o)=medic(["special:epic:healing_gun",nil,nil,nil],health:100)
+        o.players=[teammate(Point(0.62,0.5),health:30)]
+        _=step(c,o);o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
+        var shots=0
+        for k in 0..<10 { o.timestamp=0.4+0.3*Double(k);if step(c,o).intents.contains(.fireHealing) { shots += 1 } }
+        // The teammate's health never rose: three rounds over 1.6 s, then it gives up and leaves them alone for a while.
+        expectEqual(shots,3)
+        o.timestamp=3.5;o.selectedSlot=2
+        expectFalse(step(c,o).intents.contains(.selectSlot(3)))
+    }
+    @Test func testTheHealingGunNeverFiresPastAnyoneElseOrThroughCover() {
+        var (c,o)=medic(["special:epic:healing_gun",nil,nil,nil],health:100)
+        o.selectedSlot=3
+        let mate=teammate(Point(0.7,0.5),health:30),guardrail=ActionGuard(profiles:c.profiles)
+        expectTrue(guardrail.permits(.fireHealing,observation:o.with(players:[mate]),now:0,aim:mate.position))
+        // Another player on the line would take the round, perhaps an opponent.
+        o.players=[mate,.init(id:3,position:Point(0.6,0.5),affiliation:.unknown,confirmed:false)]
+        expectFalse(guardrail.permits(.fireHealing,observation:o,now:0,aim:mate.position))
+        expectFalse(step(c,o).intents.contains(.fireHealing))
+        // Trees and rocks stop rounds too.
+        o.players=[mate];o.obstacles=[.init(.tree,bounds:.init(0.6,0.45,0.03,0.1))]
+        expectFalse(guardrail.permits(.fireHealing,observation:o,now:0,aim:mate.position))
+        // Never with an opponent in the open, nor at one.
+        o.obstacles=[];var foe=enemy();foe.position=Point(0.5,0.3);o.players=[mate,foe]
+        expectFalse(guardrail.permits(.fireHealing,observation:o,now:0,aim:mate.position))
+        o.players=[enemy()];expectFalse(guardrail.permits(.fireHealing,observation:o,now:0,aim:Point(0.7,0.5)))
+    }
+    @Test func testTheHealingGunBouncesSquareOffAWallBackToYou() {
+        var (c,o)=medic(["special:epic:healing_gun",nil,nil,nil])
+        // A wall 0.08 view widths to your right, running up and down; you stand still.
+        o.obstacles=[.init(.wall,bounds:.init(0.58,0.3,0.02,0.4))];o.ownVelocity=Point()
+        assertRelease(step(c,o)) // Only in a safe gap, like a potion.
+        o.timestamp=2.1;expectEqual(step(c,o).reason,"Select Epic Healing Gun to heal you off a wall")
+        expectEqual(c.healingItem,"Epic Healing Gun") // The app asks you to stand still.
+        o.timestamp=2.15;o.selectedSlot=3;_=step(c,o)
+        o.timestamp=2.5;let shot=step(c,o)
+        expectEqual(shot.intents,[.aim(Point(0.58,0.5)),.fireHealing]);expectEqual(shot.reason,"Epic Healing Gun off the wall to heal you: health 30")
+        expectTrue(ActionGuard(profiles:c.profiles).permits(.fireHealing,observation:o,now:2.5,aim:Point(0.58,0.5)))
+        // Walking, the round would come back to where you were: it waits for you to stand still.
+        o.ownVelocity=Point(0.1,0);o.timestamp=3.0;let moving=step(c,o)
+        expectEqual(moving.reason,"Stand still: the Epic Healing Gun bounces off the wall back to you");expectFalse(moving.intents.contains(.fireHealing))
+        expectFalse(ActionGuard(profiles:c.profiles).permits(.fireHealing,observation:o,now:3.0,aim:Point(0.58,0.5)))
+        // Standing still again, with the first round's 12 health back.
+        o.ownVelocity=Point();o.health=42;o.timestamp=3.1;expectTrue(step(c,o).intents.contains(.fireHealing))
+        o.health=89;o.timestamp=3.7;expectEqual(step(c,o).reason,"Healed with the Epic Healing Gun")
+    }
+    @Test func testABounceNeedsAFlatWallSquareToTheShot() {
+        var o=observation();o.ownVelocity=Point()
+        // A wall's corner: rays beside the shot miss it.
+        o.obstacles=[.init(.wall,bounds:.init(0.58,0.49,0.02,0.02))];#expect(Policy.bounceTarget(o) == nil)
+        // A slanted wall, a staircase of cells nearer on one side than the other.
+        o.obstacles=[.init(.wall,bounds:.init(0.56,0.4,0.06,0.2),maskCells:(0..<10).map { k in Rect(0.56+0.004*Double(k),0.4+0.02*Double(k),0.02,0.02) })]
+        #expect(Policy.bounceTarget(o) == nil)
+        // Inside the gun's muzzle, or too far for the round to come back.
+        o.obstacles=[.init(.wall,bounds:.init(0.53,0.3,0.02,0.4))];#expect(Policy.bounceTarget(o) == nil)
+        o.obstacles=[.init(.wall,bounds:.init(0.7,0.3,0.02,0.4))];#expect(Policy.bounceTarget(o) == nil)
+        // A tree in front of the wall would take the round.
+        o.obstacles=[.init(.wall,bounds:.init(0.58,0.3,0.02,0.4)),.init(.tree,bounds:.init(0.54,0.48,0.02,0.04))];#expect(Policy.bounceTarget(o) == nil)
+        // A wall above you, running left and right, does; so does the nearer of two.
+        o.obstacles=[.init(.wall,bounds:.init(0.3,0.36,0.4,0.02)),.init(.wall,bounds:.init(0.6,0.3,0.02,0.4))]
+        let up=Policy.bounceTarget(o)
+        #expect(up.map { abs($0.x-0.5)<1e-9 && abs($0.y-0.38)<1e-9 } == true)
+    }
+    @Test func testTheHealingGunNeverFightsOrFinishesACombo() {
+        let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+        var o=observation()
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"special:epic:healing_gun",totalAmmo:8),.init(3,count:0),.init(4,count:0),.init(5,count:0),.init(6,count:0)]
+        o.players=[enemy()]
+        let d=step(c,o)
+        expectFalse(d.intents.contains(.fire));expectFalse(d.intents.contains(.fireHealing))
+        let guardrail=ActionGuard(profiles:c.profiles)
+        for intent in [InputIntent.fire,.fireAtPull,.fireHealing] { expectFalse(guardrail.permits(intent,observation:o,now:0,aim:Point(0.7,0.5))) }
+        // With a Reverse Impulse, an opponent in the open still gets the M4, not a pull into healing rounds.
+        let (combo,fight)=comboFight(["reverse_impulse_grenade","special:epic:healing_gun",nil,nil])
+        expectTrue(step(combo,fight).intents.contains(.fire))
+        // It is never picked up for you either.
+        var (looter,offer)=kitted(nil,nil);offer.prompt=HUDText.prompt(lines:["Healing Weapon","E","Epic Unique"],confidence:1,catalog:.standard,key:"E")
+        expectEqual(step(looter,offer).reason,"Not picking up Epic Healing Gun: launchers and special weapons stay manual")
+    }
+    @Test func testTheHealingGunTakesAHealSlotButNeverMakesWay() {
+        // An AR, the Healing Gun and three potions, as recorded: the missing SMG takes the potion that helps least.
+        let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+        var o=observation();o.shield=100
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"ar:legendary:ar15",ammo:30,reserveAmmo:90),.init(3,itemID:"special:epic:healing_gun",totalAmmo:8),
+                     .init(4,itemID:"small_shield"),.init(5,itemID:"medkit"),.init(6,itemID:"hybrid_potion")]
+        o.prompt=gunPrompt("Uzi","Common SMG")
+        expectEqual(step(c,o).reason,"Select slot 4 to swap for Uzi")
+        // With one potion and a utility item, the utility item goes; the Healing Gun stays either way.
+        let d=Coordinator(catalog:.standard);d.features.idleWeapon=false
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"ar:legendary:ar15",ammo:30,reserveAmmo:90),.init(3,itemID:"special:epic:healing_gun",totalAmmo:8),
+                     .init(4,itemID:"medkit"),.init(5,itemID:"sniper:rare:bolt_mk2",ammo:5,reserveAmmo:10),.init(6,itemID:"frag_grenade",count:3)]
+        expectEqual(step(d,o).reason,"Select slot 6 to swap for Uzi")
+    }
+    @Test func testHealingItemsAreNamedFromTheirPrompts() {
+        let catalog=ItemCatalog.standard
+        func id(_ lines:[String])->String? { HUDText.prompt(lines:lines,confidence:1,catalog:catalog,key:"E")?.itemID }
+        // As recorded: the panel calls the Healing Gun "Healing Weapon".
+        expectEqual(id(["x2","Healing Grenade","E","Legendary Grenade"]),"healing_grenade")
+        expectEqual(id(["Healing Weapon","E","Epic Unique"]),"special:epic:healing_gun")
+        expectEqual(id(["Healing Gun","E","Epic Unique"]),"special:epic:healing_gun")
+        expectEqual(id(["Healing Gun","E","Epic Healing"]),"special:epic:healing_gun")
+        let gun=catalog.profile("special:epic:healing_gun")!,grenade=catalog.profile("healing_grenade")!
+        expectTrue(Policy.isHealingGun(gun));expectEqual(gun.role,nil);expectEqual(gun.healthGain,12)
+        expectTrue(Policy.isHealGrenade(grenade));expectTrue(Coordinator.isUtility(grenade))
+        // About 20 health a second for 4.5 s, in a circle 0.118 view widths across its radius, as measured.
+        expectEqual(grenade.healthGain/grenade.overTime,20);expectEqual(grenade.radius,0.118)
+        expectFalse(Policy.isHealingGun(catalog.profile("special:mythic:crossbow")!))
+    }
+    @Test func testTeammateTagsKeepTheirRosterName() {
+        var t=AffiliationTracker();let roster=["Chris_Hansen","SLK_2fps"]
+        t.record(track:1,read:.text("Chris_Hanseh",0.9),roster:roster,time:0)
+        expectEqual(t.name(track:1,time:0.1),"Chris_Hansen")
+        t.record(track:2,read:.text("speedrun",0.9),roster:roster,time:0);t.record(track:2,read:.text("speedrun",0.9),roster:roster,time:0.5)
+        expectEqual(t.name(track:2,time:0.6),nil) // An opponent has no roster name.
+        expectEqual(t.name(track:1,time:20),nil) // Nor a tag not read for a long while.
+    }
+}
+
+private extension Observation {
+    func with(players: [PlayerTrack]) -> Observation { var o = self; o.players = players; return o }
 }
 
 private func expectEqual<T:Equatable>(_ actual:T,_ expected:T,_ message:String="",file:StaticString=#filePath,line:UInt=#line) {

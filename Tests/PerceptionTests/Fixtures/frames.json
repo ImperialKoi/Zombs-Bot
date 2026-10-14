@@ -82,5 +82,53 @@
     "y": 825
    }
   ]
+ },
+ "c-003153": {
+  "width": 2880,
+  "height": 1376,
+  "parts": [
+   {
+    "file": "c-003153-bottomLeft.jpg",
+    "x": 0,
+    "y": 825
+   },
+   {
+    "file": "c-003153-bottomRight.png",
+    "x": 2073,
+    "y": 1018
+   }
+  ]
+ },
+ "d-000548": {
+  "width": 2880,
+  "height": 1376,
+  "parts": [
+   {
+    "file": "d-000548-bottomLeft.jpg",
+    "x": 0,
+    "y": 825
+   },
+   {
+    "file": "d-000548-bottomRight.png",
+    "x": 2073,
+    "y": 1018
+   }
+  ]
+ },
+ "c-002842": {
+  "width": 2880,
+  "height": 1376,
+  "parts": [
+   {
+    "file": "c-002842-bottomLeft.jpg",
+    "x": 0,
+    "y": 825
+   },
+   {
+    "file": "c-002842-bottomRight.png",
+    "x": 2073,
+    "y": 1018
+   }
+  ]
  }
 }

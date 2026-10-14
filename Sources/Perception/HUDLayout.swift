@@ -19,6 +19,10 @@ enum HUDGeometry {
     static let keyX = 1.16...1.66
     static let reservePitch = 1.204, reserveAboveSlots = 0.20...0.63
     static let rosterPitch = 0.945, rosterNameFromBottom = 2.72...3.06, rosterHealthFromBottom = 2.36
+    /// A teammate's roster bars, measured on 2880×1376 Duo and Squad recordings: the shield bar's center (above the health
+    /// bar's), both bars' left edge and full length, and their half heights.
+    static let rosterShieldFromBottom = 2.63, rosterBarStart = 0.394, rosterBarLength = 2.564
+    static let rosterHealthHalfHeight = 0.105, rosterShieldHalfHeight = 0.05
     static let tileColor = RGB(205, 207, 194)
 }
 
@@ -89,6 +93,13 @@ public struct HUDLayout: Codable, Equatable, Sendable {
     }
     public func rosterHealthRow(_ row: Int) -> Double {
         H - (HUDGeometry.rosterHealthFromBottom + Double(row) * HUDGeometry.rosterPitch) * unit
+    }
+    public func rosterShieldRow(_ row: Int) -> Double {
+        H - (HUDGeometry.rosterShieldFromBottom + Double(row) * HUDGeometry.rosterPitch) * unit
+    }
+    /// The roster row whose name is printed at pixel height `y`, as a read of `roster` places it.
+    public func rosterRow(nameAt y: Double) -> Int? {
+        (0..<3).first { abs(rosterName($0).midY - y) <= 0.35 * HUDGeometry.rosterPitch * unit }
     }
     /// All roster names, for one text read.
     public var roster: PixelRect {

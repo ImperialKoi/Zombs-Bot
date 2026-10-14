@@ -72,6 +72,8 @@ public struct WeaponModel: Codable, Equatable, Sendable {
     public var projectileSpeed: Double?
     public var zoom: Double?
     public var maxRange: Double?
+    /// Health each round restores to whoever it hits, instead of damage (the Healing Gun).
+    public var healthGain: Double?
 
     public static let rarityStep = 3.0
     public func power(_ rarity: Rarity) -> Double { Double(101 - rank) + Self.rarityStep * Double(rarity.rawValue - best.rawValue) }
@@ -118,6 +120,9 @@ public struct ThrowableSpec: Codable, Equatable, Sendable {
     public var groundStack: Int?
     /// Worth in the loadout's one utility slot (`ItemProfile.power`): the Reverse Impulse, which starts combos, most.
     public var power: Double?
+    /// Healing throwables: health restored to someone inside the circle the whole time, and the seconds it heals for.
+    public var healthGain: Double?
+    public var duration: Double?
 }
 
 /// Items the assistant can recognize. Weapon IDs are `<class>:<rarity>:<model>` for a gun whose name is in `models`,
@@ -241,7 +246,7 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
             p.weaponClass = weaponClass; p.rarity = rarity; p.ammo = named?.ammo ?? spec.ammo
             p.minHitProbability = named?.minHitProbability ?? spec.minHitProbability
             p.zoom = named?.zoom ?? spec.zoom ?? 1
-            p.radius = named?.radius ?? 0; p.fuse = named?.fuse ?? 0
+            p.radius = named?.radius ?? 0; p.fuse = named?.fuse ?? 0; p.healthGain = named?.healthGain ?? 0
             // A gun whose name is not recognized counts as an average one of its class.
             let average = spec.power.map { $0 + WeaponModel.rarityStep * Double(rarity.rawValue - Rarity.legendary.rawValue) }
             p.power = named.map { $0.power(rarity) } ?? average
@@ -264,6 +269,7 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
             p.effect = spec.effect; p.fuse = spec.fuse; p.radius = spec.radius; p.damage = spec.damage
             p.throwRange = spec.throwRange; p.shotInterval = spec.throwInterval; p.pullDuration = spec.pullDuration ?? 0
             p.maxStack = spec.maxStack; p.groundStack = spec.groundStack; p.power = spec.power
+            p.healthGain = spec.healthGain ?? 0; p.overTime = spec.duration ?? 0
             return p
         }
         return nil
@@ -363,6 +369,13 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
                         projectileSpeed: 0.75, zoom: 1.2, maxRange: 0.8),
             WeaponModel(id: "crossbow", name: "Crossbow", weaponClass: .special, rank: 34, best: .mythic, shotInterval: 1.6, reloadDuration: 1.6, ammo: .large,
                         projectileSpeed: 0.75, zoom: 1.2, maxRange: 0.8),
+            // Its rounds heal whoever they hit, 12 health each and no shield, and hurt nobody. They bounce off walls: fired square
+            // at one, a round comes straight back and heals you. 8 rounds, no reload. It is never fired in a fight, only to heal
+            // (see `Coordinator`), and stays below every gun in the ranking. The wiki says only that its fire rate was lowered in
+            // 2021; the rate, bullet speed and range here are estimates, and it is clicked once per round.
+            WeaponModel(id: "healing_gun", name: "Healing Gun", aliases: ["Healing Weapon"], weaponClass: .special, rank: 43, best: .epic,
+                        automatic: false, shotInterval: 0.5, reloadDuration: 1, minHitProbability: 0.15, projectileSpeed: 1.1, maxRange: 0.45,
+                        healthGain: 12),
         ],
         heals: [
             // Keep values: small shields only work below 50 shield and bandages below 75 health, so they are cheap to spend;
@@ -385,9 +398,9 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
         // Fuses and damage from the ZombsRoyale wiki (October 2026): a Frag goes off about 2 s after the throw, an RGD-5 and
         // an Impulse about 0.5 s; the Reverse Impulse is taken to be as quick as the Impulse, as the wiki's combos imply
         // (Frag first, then the Reverse Impulse; Reverse Impulse first, then the RGD-5). Stacks from docs/WEAPONS.md. Blast and
-        // pull radii, throw ranges, intervals and how long a pull takes are estimates to check in play. Only pulls and blasts
-        // that land where you click are ever thrown: a Sticky Bomb flies until it hits something, a Cactus Bomb bursts into
-        // bouncing thorns, and the rest do not combine.
+        // pull radii, throw ranges, intervals and how long a pull takes are estimates to check in play. Only pulls, blasts and
+        // Healing Grenades, which land where you click, are ever thrown: a Sticky Bomb flies until it hits something, a Cactus
+        // Bomb bursts into bouncing thorns, and the rest do not combine.
         throwables: [
             ThrowableSpec(id: "frag_grenade", name: "Frag Grenade", aliases: ["Frag"], effect: .blast, fuse: 2, radius: 0.08, damage: 83,
                           throwRange: 0.4, throwInterval: 1, maxStack: 9, groundStack: 3, power: 8),
@@ -406,7 +419,11 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
             ThrowableSpec(id: "smoke_grenade", name: "Smoke Grenade", effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0, throwInterval: 1, maxStack: 9, groundStack: 3, power: 3),
             ThrowableSpec(id: "freeze_grenade", name: "Freeze Grenade", effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0, throwInterval: 1, maxStack: 3, groundStack: 3, power: 4),
             ThrowableSpec(id: "snowman_grenade", name: "Snowman Grenade", effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0, throwInterval: 1, maxStack: 6, groundStack: 3, power: 3),
-            ThrowableSpec(id: "healing_grenade", name: "Healing Grenade", effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0, throwInterval: 1, maxStack: 6, groundStack: 2, power: 4),
+            // Measured on a recorded Duo match (October 2026): it lies on the ground for about a second, then a circle 0.118 view
+            // widths in radius heals everyone of your team inside it for 4.5 s, health only, +5 about four times a second (some 20
+            // a second); never opponents. The fuse is an estimate between 0.9 and 1.8 s.
+            ThrowableSpec(id: "healing_grenade", name: "Healing Grenade", aliases: ["Heal Grenade"], effect: .heal, fuse: 1.2, radius: 0.118, damage: 0,
+                          throwRange: 0.4, throwInterval: 1, maxStack: 6, groundStack: 2, power: 4, healthGain: 90, duration: 4.5),
             ThrowableSpec(id: "shuriken", name: "Shuriken", effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0, throwInterval: 0.5, maxStack: 90, groundStack: 30, power: 2),
             ThrowableSpec(id: "snowball", name: "Snowball", effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0, throwInterval: 0.5, maxStack: 30, groundStack: 6, power: 1),
             // Fired, not thrown, and never used by the assistant; it rides in the utility slot ("Grappling Hook / Legendary

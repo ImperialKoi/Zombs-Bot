@@ -77,6 +77,30 @@ struct PerceptionTests {
         #expect(try read("a-010611").rosterRows == 0)
     }
 
+    @Test func testRosterBarsGiveEachTeammatesHealthAndShield() throws {
+        #expect(try read("b-004539").roster == [RosterVitals(row: 0, down: false, health: 100, shield: 100)])
+        let hurt = try #require(try read("c-003153").roster.first)
+        #expect(!hurt.down && abs(hurt.health - 29.6) <= 1.5 && abs(hurt.shield - 49.3) <= 1.5)
+        // Knocked down: the health bar turns red while they bleed out.
+        #expect(try read("c-002842").roster.first?.down == true)
+        // Three teammates over the storm, whose orange shows through the empty shield bars, and a teammate's map pin over
+        // the bottom row's full health bar.
+        let squad = try read("d-000548").roster
+        #expect(squad.map(\.row) == [0, 1, 2] && squad.allSatisfy { !$0.down && $0.shield == 0 })
+        #expect(zip(squad.map(\.health), [100, 48.2, 34.4]).allSatisfy { abs($0 - $1) <= 1.5 })
+    }
+
+    @Test func testATeammateCountsAsDownUntilTheirBarHasStayedGreen() throws {
+        let engine = PerceptionEngine(artifacts: nil, settings: PerceptionSettings(mode: .duo), library: IconLibrary(entries: []),
+                                      text: TextReader(synchronous: true))
+        let down = try frame("c-002842"), up = try frame("c-003153")
+        #expect(engine.process(image: down, ciImage: nil, timestamp: 0).observation.squad.first?.down == true)
+        // A revive starting flashes the bar green for a frame.
+        #expect(engine.process(image: up, ciImage: nil, timestamp: 0.4).observation.squad.first?.down == true)
+        let later = try #require(engine.process(image: up, ciImage: nil, timestamp: 1.5).observation.squad.first)
+        #expect(!later.down && abs(later.health - 29.6) <= 1.5 && later.name == "Chris_Hansen")
+    }
+
     func promptOf(_ name: String) throws -> InteractionPrompt? {
         let image = try frame(name)
         let layout = try #require(HUDLayout.detect(in: image))

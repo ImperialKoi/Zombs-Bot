@@ -70,10 +70,11 @@ public enum HUDText {
             if catalog.healingWords.contains(phrase), let heal = catalog.heal(named: name) {
                 return InteractionPrompt(name: name, subtitle: subtitle, kind: .healing, itemID: heal.id, rarity: rarity, count: count, confidence: confidence)
             }
-            // Unique items are named, not classed ("Gift Launcher / Legendary Unique", "Crossbow / Mythic Unique"). A launcher
-            // or bow the catalog names gets its class; such weapons only ever finish combos. A throwable of that name (the
-            // Shuriken) is a throwable. Other unique guns (the Minigun, the Flamethrower) stay unrecognized, as before.
-            if phrase == "unique" {
+            // Unique items are named, not classed ("Gift Launcher / Legendary Unique", "Crossbow / Mythic Unique"). A launcher,
+            // bow or the Healing Gun the catalog names gets its class; launchers and bows only ever finish combos, and the Healing
+            // Gun only heals. A throwable of that name (the Shuriken) is a throwable. Other unique guns (the Minigun, the
+            // Flamethrower) stay unrecognized, as before. A healing word in place of "Unique" is read the same way.
+            if phrase == "unique" || catalog.healingWords.contains(phrase) {
                 if let model = catalog.model(named: name, weaponClass: nil), catalog.weapon(model.weaponClass)?.role == nil {
                     return InteractionPrompt(name: name, subtitle: subtitle, kind: .weapon, itemID: catalog.weaponID(model.weaponClass, rarity, name: name),
                                              weaponClass: model.weaponClass, rarity: rarity, count: count, confidence: confidence)

@@ -175,7 +175,7 @@ Damage and DPS are at the best rarity normally found. A range such as 10–15 is
 | <img src="weapons/thors_hammer.png" width="64" alt="Thor's Hammer"> | **Thor's Hammer** | Mythic | Airdrop only | Thrown hammer: 45 direct / 25 splash, knocks players back. |
 | <img src="weapons/trident.png" width="64" alt="Trident of the Depths"> | **Trident of the Depths** | Mythic | Airdrop only | Thrown trident: 25 splash and pulls everyone in, like a Reverse Impulse. |
 | <img src="weapons/airstrike_gun.png" width="64" alt="Airstrike Gun"> | **Airstrike Gun** | Legendary | Gold Chests | Flare that calls ~5 s of explosions (9–10 each, stacking); hurts you too. Recorded prompts show it as a throwable, "Airstrike / Legendary Grenade", in stacks of 5. |
-| <img src="weapons/healing_gun.png" width="64" alt="Healing Gun"> | **Healing Gun** | Epic | Crates, Gold Chests, Airdrops | Heals 12 health per shot (no shield); bounce shots off walls to heal yourself. 8 shots, no reload. |
+| <img src="weapons/healing_gun.png" width="64" alt="Healing Gun"> | **Healing Gun** | Epic | Crates, Gold Chests, Airdrops | Heals 12 health per shot (no shield); bounce shots off walls to heal yourself. 8 shots, no reload. The prompt calls it "Healing Weapon / Epic Unique"; in hand, the readout shows the rounds left as a bare count ("8"), as for a grenade. |
 | <img src="weapons/grappling_hook.png" width="64" alt="Grappling Hook"> | **Grappling Hook** | Legendary | Crates, Gold Chests | Pulls you to the point you hit; 20 uses. |
 | <img src="weapons/turret.png" width="64" alt="Turret"> | **Turret** | Mythic | Vaulted; 50v50 Airdrops only | Thrown turret that fires at nearby enemies until destroyed. |
 
@@ -196,7 +196,7 @@ Lethal grenades hurt you but not your teammates. Stack is the amount you find / 
 | <img src="weapons/smoke_grenade.png" width="56" alt="Smoke Grenade"> | **Smoke Grenade** | Common | 3 / 9 | Smoke cloud that hides players and items; no damage. |
 | <img src="weapons/freeze_grenade.png" width="56" alt="Freeze Grenade"> | **Freeze Grenade** ● | Legendary | 3 / 3 | Slows, then freezes everyone in a small radius, you included. |
 | <img src="weapons/snowman_grenade.png" width="56" alt="Snowman Grenade"> | **Snowman Grenade** ● | Common–Legendary | 3 / 6 | Builds a hollow box of breakable snowmen as cover. |
-| <img src="weapons/healing_grenade.png" width="56" alt="Healing Grenade"> | **Healing Grenade** ● | Legendary | 2 / 6 | Heals you and teammates in the area, about +5 several times a second (added Jun 2024). |
+| <img src="weapons/healing_grenade.png" width="56" alt="Healing Grenade"> | **Healing Grenade** ● | Legendary | 2 / 6 | Heals you and teammates in the area, not opponents (added Jun 2024). Measured on a recorded Duo match: it lies on the ground about a second, then a circle 0.118 view widths in radius heals health only, +5 about four times a second (~20/s), for 4.5 s. |
 | <img src="weapons/shuriken.png" width="56" alt="Shuriken"> | **Shuriken** | Legendary | 30 / 90 | Throws 5 stars in an arc, 20 damage each, ~2 volleys a second; short range. |
 | <img src="weapons/snowball.png" width="56" alt="Snowball"> | **Snowball** | Common | 6 / 30 | 9 damage and slows the target ~5 s; found by breaking snowy trees at Lucky Lake. |
 
@@ -259,6 +259,21 @@ The catalog (`Sources/AssistantCore/Catalog.swift`) lists the 37 guns a prompt c
 - Range, zoom and bullet speed stay class estimates, because the wiki only describes them in words.
 - Potions follow the stack sizes above. Below 50 health, or below 100 health and shield together, a potion that would help is picked up and drunk before any other loot.
 - The Stimpack stays manual. Its only use is just before a fight, which the assistant cannot time.
+
+### Healing Grenades and the Healing Gun
+
+Both restore health only, and the assistant uses them on someone below 50 health (**Low health** in Settings): you, or a teammate on screen. A teammate's health is read off their row in the roster above your name, where a thin shield bar sits over a health bar that is green while they are up and red while they are knocked down; the tag above their head says which row is theirs. An opponent in the open always gets a gun first.
+
+| Item | Who | How |
+|---|---|---|
+| **Healing Grenade** | You | Thrown at your feet, as soon as no opponent is in the open. It is one click, and the circle heals you while you fight on in it. A low teammate beside you gets it halfway between you, so the circle takes you both. A green **STAY IN THE CIRCLE** label counts down while it heals you. |
+| **Healing Grenade** | A teammate | Thrown at their feet, where they will be a moment later, when a throw can reach them. Nothing is thrown through a wall, which it would bounce off. |
+| **Healing Gun** | A teammate | A round at a time, leading them as they move, with no wall, tree, rock or other player on the way: a round heals whoever it reaches first, an opponent too. It stops within one round (12 health) of full. |
+| **Healing Gun** | You | In a safe gap, fired square at the nearest flat wall face within 0.045–0.15 view widths along the screen's axes, so the round comes straight back to you. Only while you stand still (**STOP MOVING** shows): a round comes back to where you stood. |
+
+Nobody in a circle of yours gets another heal while it lasts, and potions do not top up health a circle is about to restore. Rounds that raise nobody's health for 1.6 s end the heal, and that heal is not tried again for 10 s. The Healing Gun is never used to fight or to finish a combo, and it is never picked up for you. A Healing Grenade counts as the loadout's utility item, ranked below the combat grenades.
+
+**Measured:** the circle's radius, rate and 4.5 s, on one recorded throw at a teammate. **Estimated:** the delay before the circle opens (0.9–1.8 s; 1.2 s is used), the throw range, and the Healing Gun's fire rate (one round every 0.5 s), bullet speed and range. No recording shows the Healing Gun fired.
 
 ### Reverse Impulse combos
 

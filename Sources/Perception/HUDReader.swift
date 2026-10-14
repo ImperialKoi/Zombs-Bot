@@ -38,6 +38,16 @@ public struct SlotReading: Equatable, Sendable {
     public var number: [UInt8]
 }
 
+/// A teammate's health and shield off their roster row, 0 to 100.
+public struct RosterVitals: Equatable, Sendable {
+    /// 0 is the row just above your name.
+    public var row: Int
+    /// Knocked down: the health bar turns red while they bleed out, until someone revives them.
+    public var down: Bool
+    public var health: Double
+    public var shield: Double
+}
+
 public struct HUDSnapshot: Sendable {
     public var layout: HUDLayout
     public var alive: Bool
@@ -56,6 +66,8 @@ public struct HUDSnapshot: Sendable {
     public var reserveFingerprints: [[UInt8]]
     /// Teammate roster rows showing a health bar.
     public var rosterRows: Int
+    /// Their health and shield, for the rows whose bars could be read.
+    public var roster: [RosterVitals] = []
 }
 
 /// Per-frame pixel measurements of the HUD. No text recognition happens here.
@@ -85,6 +97,7 @@ public enum HUDReader {
         snapshot.readoutFingerprint = image.fingerprint(layout.readout, columns: 20, rows: 4)
         snapshot.reserveFingerprints = (0..<4).map { image.fingerprint(layout.reserveCounter($0), columns: 8, rows: 3) }
         snapshot.rosterRows = rosterRows(image, layout: layout)
+        snapshot.roster = (0..<snapshot.rosterRows).compactMap { rosterVitals(image, layout: layout, row: $0) }
         return snapshot
     }
 
@@ -281,5 +294,53 @@ public enum HUDReader {
             if run * 10 >= samples * 6 && thin * 10 >= run * 8 { rows = row + 1 }
         }
         return rows
+    }
+
+    /// Roster bar fills, the same in every recorded match: health while up, health while knocked down, shield.
+    static let rosterHealth = RGB(119, 203, 61), rosterDown = RGB(209, 56, 58), rosterShield = RGB(213, 86, 239)
+    /// The widest gap in a bar's fill that is a map pin over it, in tiles: a recorded pin with its shadow covered 0.68.
+    static let rosterPinWidth = 0.8
+
+    /// A teammate's health and shield off their roster row; nil when the health bar shows neither fill (a teammate out of
+    /// the match, or a row the map behind it makes unreadable). An empty shield bar reads 0.
+    static func rosterVitals(_ image: PixelImage, layout: HUDLayout, row: Int) -> RosterVitals? {
+        guard let health = rosterBar(image, layout: layout, y: layout.rosterHealthRow(row), halfHeight: HUDGeometry.rosterHealthHalfHeight,
+                                     fills: [rosterHealth, rosterDown]) else { return nil }
+        let shield = rosterBar(image, layout: layout, y: layout.rosterShieldRow(row), halfHeight: HUDGeometry.rosterShieldHalfHeight, fills: [rosterShield])
+        return RosterVitals(row: row, down: health.fill == 1, health: health.value, shield: shield?.value ?? 0)
+    }
+
+    /// How full a roster bar centered at height `y` is, 0 to 100, and which of `fills` it shows. The fill starts at the bar's
+    /// left edge and is a band no taller than the bar, and three rows across it agree. The map shows through the bar's empty
+    /// part, darkened, and around it; a bright map can share a fill's color, but not as such a band. A teammate's map pin may
+    /// cover part of a bar: the fill goes on past a gap up to `rosterPinWidth` where its color resumes. `halfHeight` is in tiles.
+    static func rosterBar(_ image: PixelImage, layout: HUDLayout, y: Double, halfHeight: Double, fills: [RGB]) -> (fill: Int, value: Double)? {
+        let u = layout.unit, start = HUDGeometry.rosterBarStart * u, length = HUDGeometry.rosterBarLength * u
+        let probe = start + 0.035 * u
+        var readings: [(fill: Int, value: Double)] = []
+        for dy in [-0.5, 0, 0.5] {
+            let row = y + dy * halfHeight * u
+            let c = image.pixel(probe, row)
+            guard let fill = fills.firstIndex(where: { c.distance($0) <= 30 }) else { continue }
+            let color = fills[fill]
+            guard image.pixel(probe, y - 1.6 * halfHeight * u).distance(color) > 30, image.pixel(probe, y + 1.6 * halfHeight * u).distance(color) > 30
+            else { continue }
+            // The fill's left end is the bar's edge; a color that goes on past it is the map.
+            var left = probe
+            while left - 1 >= start - 0.06 * u && image.pixel(left - 1, row).distance(color) <= 30 { left -= 1 }
+            guard left - 1 >= start - 0.06 * u else { continue }
+            var end = probe, x = probe
+            let limit = min(Double(image.width - 1), start + length * 1.03)
+            while x < limit && x - end <= Self.rosterPinWidth * u {
+                x += 1
+                if image.pixel(x, row).distance(color) <= 30 { end = x }
+            }
+            readings.append((fill, min(100, max(0, (end - left + 1) / length * 100))))
+        }
+        guard readings.count >= 2, Set(readings.map(\.fill)).count == 1 else { return nil }
+        let values = readings.map(\.value).sorted()
+        guard values.last! - values.first! <= 3 else { return nil }
+        let middle = values[values.count / 2]
+        return (readings[0].fill, middle >= 98.5 ? 100 : middle <= 1.5 ? 0 : middle)
     }
 }

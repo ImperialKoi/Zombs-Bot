@@ -45,7 +45,7 @@ struct Dashboard:View {
                         Toggle("Open chests & crates",isOn:$model.features.chests)
                         Toggle("Carry the sniper when it's quiet",isOn:$model.features.idleWeapon)
                         Toggle("Reverse Impulse combos",isOn:$model.features.combos)
-                        Toggle("Heal during safe gaps",isOn:$model.features.healing)
+                        Toggle("Heal you and teammates",isOn:$model.features.healing)
                         Button(model.armed ? "Turn off supervised input" : "Enable supervised input",systemImage:model.armed ? "power" : "play.fill") {
                             if model.armed { model.pause() } else { model.arm() }
                         }.disabled(!model.capturing || (!model.armed && !model.inputReady))
@@ -91,7 +91,12 @@ struct Dashboard:View {
                     } else if let lines=model.report?.promptLines, !lines.isEmpty {
                         Text("Prompt text: \(lines.joined(separator:" / "))").font(.callout).foregroundStyle(.secondary)
                     }
-                    if let roster=model.report?.roster, !roster.isEmpty { Text("Teammates: \(roster.joined(separator:", "))").font(.callout).foregroundStyle(.secondary) }
+                    if !model.observation.squad.isEmpty {
+                        // Each roster row's name, health and shield, as the bars above your name show them.
+                        Text("Teammates: "+model.observation.squad.map { mate in
+                            "\(mate.name ?? "?") "+(mate.down ? "down" : "\(Int(mate.health.rounded())) health, \(Int(mate.shield.rounded())) shield")
+                        }.joined(separator:" · ")).font(.callout).foregroundStyle(.secondary)
+                    } else if let roster=model.report?.roster, !roster.isEmpty { Text("Teammates: \(roster.joined(separator:", "))").font(.callout).foregroundStyle(.secondary) }
                     ForEach(model.report?.problems ?? [],id:\.self) { Text($0).font(.callout).foregroundStyle(.secondary) }
                 }.frame(maxWidth:.infinity,alignment:.leading).padding(14).background(.quaternary,in:RoundedRectangle(cornerRadius:12))
             }.padding(24)

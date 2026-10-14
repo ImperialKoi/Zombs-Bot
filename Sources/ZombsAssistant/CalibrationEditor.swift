@@ -56,6 +56,9 @@ struct CalibrationEditor:View {
                     }
                     Text("Grenades land where you click, so Reverse Impulses and grenades are thrown within this share of the view's height from your character. At the far right they may land anywhere on screen, except near its edges. The inventory, buttons, minimap, vitals and the item panel are never clicked.")
                         .font(.caption).foregroundStyle(.secondary)
+                    Slider(value:$draft.combat.lowHealth,in:20...80,step:5) { Text(String(format:"Low health %.0f",draft.combat.lowHealth)).frame(width:170,alignment:.leading) }
+                    Text("Below this health a Healing Grenade or the Healing Gun heals you or a teammate, and a potion that helps is picked up and drunk before other loot (also below twice this in health and shield together).")
+                        .font(.caption).foregroundStyle(.secondary)
                     Stepper("Keep \(draft.combat.minHealSlots) slots for heals and utility when picking up a missing gun",value:$draft.combat.minHealSlots,in:0...4)
                     Text("The loadout the assistant works toward: sniper, AR, SMG, then a utility item (grenades, Reverse Impulses, a Grappling Hook) or heals, and heals.")
                         .font(.caption).foregroundStyle(.secondary)

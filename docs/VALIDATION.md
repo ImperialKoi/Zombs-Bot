@@ -1,6 +1,75 @@
 # Validation status
 
-Updated October 13, 2026 on this Apple silicon Mac (8 GB M1).
+Updated October 14, 2026 on this Apple silicon Mac (8 GB M1).
+
+## Healing Grenades, the Healing Gun and teammates' health, October 14
+
+You asked for:
+- the Healing Grenade thrown onto the ground at your feet, or at a teammate's feet when they are low on health;
+- the Healing Gun used on low teammates, and bounced off walls back to you to heal yourself.
+
+This was checked offline only.
+
+**Measured on recordings:**
+- **Healing Grenade**, two throws in Duo `1EF797`:
+  - The prompt reads "Healing Grenade / Legendary Grenade", with an "x2" badge. With one in hand the ammunition readout shows a bare count ("4").
+  - Thrown at a teammate who had just been revived (health 30), it lay on the ground about a second, then a lime circle opened. A circle fitted to it in every frame had a radius of 341 px at 2880 wide, 0.118 view widths, the same in every frame, for 4.5 s.
+  - The teammate's roster bar rose from 35 to 100 in 2.8 s while a Hybrid Potion added its 2.5 a second. The circle gave about 20 health a second, +5 four times a second, and no shield.
+  - The delay before the circle opens lies between 0.9 and 1.8 s across the two throws; 1.2 s is used.
+- **Healing Gun**, a pickup in Duo `212F9A` and one on the ground in Solo `C65233`:
+  - The prompt reads "Healing Weapon / Epic Unique", not "Healing Gun".
+  - In hand, the readout is a bare "8" and the slot prints "8", so it does not count as a gun in hand.
+  - No recording shows it fired: the fire rate (0.5 s), bullet speed and range are estimates, as is the bounce, which comes from the wiki.
+  - The earlier code took this pickup for the Frag Grenade whose prompt had just been on screen. The **Duo `212F9A`** entry of October 13 below calls it a Frag. Neither icon library had learned that label.
+- **Teammates' roster rows**, 2880×1376 Duo and Squad matches:
+  - Each row has a shield bar over a health bar, starting 0.394 tiles from the left and 2.564 tiles long at 100%. The bars are centred 2.63 and 2.37 tiles above the bottom, rows 0.945 tiles apart.
+  - Fill colours are the same in every match: health green (119, 203, 61), shield magenta (213, 86, 239), knocked-down red (209, 56, 58).
+  - In `1EF797` the bar turned red exactly while the teammate was down, from the hit at 86 s to the revive at 103.6 s, and came back green at 30.
+
+**Reading teammates' health** (`HUDReader.rosterVitals`, `Observation.squad`):
+- Duo `1EF797`: 866 of 872 live frames read. Squad `26EE15`: all three rows on 421 of 486. Values followed knock-downs, revives, potions and the grenade.
+- The map shows through empty bars. Over the storm's orange, an empty shield track looks like (165–173, 56–102, 18–28). A loose colour test read those as fills; the exact fill colours do not.
+- A teammate's blue map pin, with its shadow 0.68 tiles wide, sometimes sits on a bar. It had read a full bar as 62–68 in 107 Squad frames; the fill now continues past such a gap. Six of those frames were checked by eye: every bar was full.
+- A revive starting flashes the red bar green for one frame. That one frame had led to a throw at a teammate still down. A teammate now counts as down until their bar has been green for 1 s.
+- Teammates on screen take their roster row by the name tag the app already reads (`AffiliationTracker.name`). In Duo the single row is theirs.
+
+**Decisions** (`Coordinator.supportStep`): both items heal health only, and both are used below **Low health** (50, now a Settings slider), never with an opponent in the open.
+- **Healing Grenade:**
+  - At your feet: one click, so it needs no two-second safe gap. Halfway to a low teammate beside you, so the circle takes you both.
+  - At a low teammate's feet, a moment ahead of where they are moving.
+  - Nothing is thrown through a wall. An obstacle reported where you or the teammate stand is a character the detector misread; it does not count.
+- **Healing Gun:**
+  - At a low teammate, a round at a time, leading them, with no wall, tree, rock or other player on the line.
+  - When you are low, in a safe gap: fired square at the nearest flat wall face 0.045 to 0.15 view widths away. Flat means rays 0.02 view widths to either side meet the same wall within 0.004. It fires only while you stand still.
+  - It stops within one round of full health, and gives up for 10 s when its rounds raise nobody's health for 1.6 s.
+- Circles of yours count as health on its way: nobody in one is healed again, and potions do not top up what it will restore.
+- The Healing Gun never fights or finishes a combo, and is never picked up for you. In the loadout it takes one of the two slots kept for heals and utility, but it is never the item that makes way.
+- The input guard checks every heal throw (someone of your team inside the circle, no opponent in the open) and every heal shot (a teammate's lead point with a clear line, or the computed wall point while you stand still).
+
+**Tests.** 179 Swift tests pass, 14 of them new:
+- 12 core tests:
+  - the grenade at your feet, with its circle;
+  - waiting for real need and no fight;
+  - at a teammate's feet, and halfway between you;
+  - the gun on a teammate until nearly full;
+  - rounds that heal nobody;
+  - no shot past anyone or through cover;
+  - the wall bounce and the walls that will not do;
+  - never fighting or finishing a combo;
+  - the gun's heal slot;
+  - the prompts as recorded;
+  - roster names on tags.
+- 2 perception tests, on new fixtures cut from the recordings:
+  - a hurt teammate (30 health, 49 shield), one knocked down, and three rows over the storm with a pin;
+  - the revive flash.
+
+**Replays** (`ZombsPerceive --decide` without the detector, HEAD's build against this one, same frames):
+- Solo `582E17`, `78E1A3` and `090BC4`, Duo `F91B95`, Squad `26EE15`: no decision changed in 4,272 frames.
+- Solo `C65233` and Duo `212F9A`: only the status line. A Healing Gun on the floor is now named and left to you. An Airstrike is skipped as "inventory full" instead of for a utility slot holding a Frag that was not there.
+- Duo `1EF797`: the one new decision is at the end of the match. The storm took you from 68 to 38 health with no opponent in view, and the Healing Grenade was selected to heal you. The recording never answers the keys, so the selection timed out.
+- With the detector, Duo `1EF797` also threw at the teammate at 110.6 s, at 32 health, just as the player did. It no longer threw during the revive's green flash at 95 s.
+
+**Still open:** the Healing Gun's fire rate, speed, range and bounce; the grenade's delay; and all of it in a live match.
 
 ## Grenade circle, safe clicks and the loadout, October 13
 

@@ -12,6 +12,8 @@ public struct AffiliationTracker: Sendable {
     }
     struct Evidence: Sendable {
         var matched: Double?
+        /// The roster name the tag matched last.
+        var name: String?
         var against = 0
         var seen: Double
     }
@@ -30,8 +32,9 @@ public struct AffiliationTracker: Sendable {
         e.seen = time
         switch read {
         case let .text(text, confidence):
-            let best = roster.map { HUDText.nameSimilarity(text, $0) }.max() ?? 0
-            if best >= Self.teammateSimilarity { e.matched = time; e.against = 0 }
+            let ranked = roster.map { ($0, HUDText.nameSimilarity(text, $0)) }.max { $0.1 < $1.1 }
+            let best = ranked?.1 ?? 0
+            if best >= Self.teammateSimilarity { e.matched = time; e.name = ranked?.0; e.against = 0 }
             else if best < Self.strangerSimilarity && confidence >= 0.5 && HUDText.nameKey(text).count >= 3 && !roster.isEmpty { e.against += 1 }
         case let .nothing(colored):
             if !colored && !roster.isEmpty { e.against += 1 }
@@ -44,6 +47,12 @@ public struct AffiliationTracker: Sendable {
         if let matched = e.matched, time - matched <= Self.teammateMemory { return (.teammate, 1) }
         if e.matched == nil && e.against >= Self.readsForEnemy { return (.enemy, 0.95) }
         return (.unknown, 0)
+    }
+
+    /// The roster name of a teammate's tag; nil for anyone not currently a teammate.
+    public func name(track: Int, time: Double) -> String? {
+        guard affiliation(track: track, time: time).0 == .teammate else { return nil }
+        return tracks[track]?.name
     }
 
     /// Enemies keep being re-read, so a teammate misread early is corrected by a later legible tag.

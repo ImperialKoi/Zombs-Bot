@@ -146,6 +146,7 @@ func run() throws {
                     case .aim: actions["aim", default: 0] += 1
                     case .throwAt: actions["throw", default: 0] += 1
                     case .fireAtPull: actions["fire at pull", default: 0] += 1
+                    case .fireHealing: actions["healing shot", default: 0] += 1
                     case .releaseAll: break
                     }
                 }
@@ -172,7 +173,10 @@ func run() throws {
                                          "playerDetections": o.players.map { ["x": ($0.position.x * 1000).rounded() / 1000, "y": ($0.position.y * 1000).rounded() / 1000,
                                                                               "confidence": ($0.confidence * 100).rounded() / 100, "confirmed": $0.confirmed,
                                                                               "affiliation": $0.affiliation.rawValue, "validEnemy": Policy.validEnemy($0),
-                                              "canFire": Policy.canFireToward(o, at: $0.position), "hasMotion": $0.motion != nil, "predicted": $0.predicted] },
+                                              "canFire": Policy.canFireToward(o, at: $0.position), "hasMotion": $0.motion != nil, "predicted": $0.predicted,
+                                              "name": $0.name as Any, "teammateHealth": $0.health as Any] },
+                                         "squad": o.squad.map { ["name": $0.name as Any, "down": $0.down, "health": ($0.health * 10).rounded() / 10,
+                                                                 "shield": ($0.shield * 10).rounded() / 10] },
                                          "blockers": o.obstacles.filter { $0.preventsEngagement }.map { "\($0.kind.rawValue)@\(($0.bounds.center.x * 100).rounded() / 100),\(($0.bounds.center.y * 100).rounded() / 100)" },
                                          "hudMS": result.hudMilliseconds, "detectMS": result.detectorMilliseconds]
             if let p = o.prompt { record["prompt"] = ["kind": p.kind.rawValue, "item": p.itemID as Any, "name": p.name, "subtitle": p.subtitle] }

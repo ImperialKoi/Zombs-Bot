@@ -43,6 +43,12 @@ public final class PerceptionEngine {
     private var lastLayoutSearch = -Double.infinity
     private var lastAlive = -Double.infinity
     private var roster: [String] = []
+    /// The roster names by row, where text recognition placed them, to find each teammate's health bar.
+    private var rosterNames: [Int: String] = [:]
+    /// When each roster row last showed a knocked-down teammate. A revive starting flashes their bar green for a frame.
+    private var rosterDownAt: [Int: Double] = [:]
+    /// A teammate counts as down until their bar has shown them up this long.
+    static let reviveSettle = 1.0
     private var lastRosterRead = -Double.infinity
     private var promptPanel: (fingerprint: [UInt8], since: Double)?
     private var lastTagRead: [Int: Double] = [:]
@@ -62,7 +68,7 @@ public final class PerceptionEngine {
 
     public func reset() {
         tracker.reset(); affiliation.reset(); inventory.reset(); text.reset()
-        promptPanel = nil; lastTagRead = [:]; lastTagRequest = [:]; roster = []; rosterSince = nil
+        promptPanel = nil; lastTagRead = [:]; lastTagRequest = [:]; roster = []; rosterNames = [:]; rosterDownAt = [:]; rosterSince = nil
     }
 
     public func process(image: PixelImage, ciImage: CIImage?, timestamp t: Double) -> PerceptionResult {
@@ -84,12 +90,16 @@ public final class PerceptionEngine {
             result.problems.append("HUD not found: start a match with the inventory visible")
             return result
         }
-        let hud = HUDReader.read(image, layout: layout)
+        var hud = HUDReader.read(image, layout: layout)
+        for i in hud.roster.indices {
+            let row = hud.roster[i].row
+            if hud.roster[i].down { rosterDownAt[row] = t } else if t - (rosterDownAt[row] ?? -.infinity) < Self.reviveSettle { hud.roster[i].down = true }
+        }
         result.hud = hud
         if hud.alive { lastAlive = t }
         let alive = t - lastAlive <= 0.3
         if !alive { promptPanel = nil }
-        if !alive && t - lastAlive > 10 { roster = [] } // A new match starts over.
+        if !alive && t - lastAlive > 10 { roster = []; rosterNames = [:]; rosterDownAt = [:] } // A new match starts over.
         // Solo means solo: every other player is an enemy and no name tags are read. Map details behind the HUD look
         // like a teammate roster in about one solo frame in 200, for up to a second, which used to switch team rules on.
         o.teamMode = settings.mode != .solo
@@ -163,9 +173,21 @@ public final class PerceptionEngine {
                 text.request(.roster, fingerprint: image.fingerprint(layout.roster, columns: 16, rows: 6), time: t) { image.cgImage(layout.roster) }
             }
             if let read = text.result(.roster) {
-                let names = read.lines.map { $0.text.trimmingCharacters(in: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_")).inverted) }
-                    .filter { HUDText.nameKey($0).count >= 3 }
-                if !names.isEmpty { roster = names }
+                let lines = read.lines.map { ($0, $0.text.trimmingCharacters(in: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_")).inverted)) }
+                    .filter { HUDText.nameKey($0.1).count >= 3 }
+                if !lines.isEmpty {
+                    roster = lines.map(\.1)
+                    // Each name's row, from where it was printed in the region read.
+                    let region = layout.roster
+                    var named: [Int: String] = [:]
+                    for (line, name) in lines {
+                        if let row = layout.rosterRow(nameAt: region.y + Double(line.box.midY) * region.height) { named[row] = name }
+                    }
+                    rosterNames = named
+                }
+            }
+            if o.teamMode {
+                o.squad = hud.roster.map { TeammateStatus(name: rosterNames[$0.row], down: $0.down, health: $0.health, shield: $0.shield) }
             }
             var resolved = hud
             if let slot = resolveSelection(hud, readout: readout, counts: counts, time: t) {
@@ -202,6 +224,15 @@ public final class PerceptionEngine {
                 else {
                     if !d.predicted { readNameTag(of: d, image: image, layout: layout, time: t) }
                     (player.affiliation, player.affiliationConfidence) = affiliation.affiliation(track: d.id, time: t)
+                    // A teammate's health and shield come from the roster row with their name; a single row is theirs.
+                    if let name = affiliation.name(track: d.id, time: t) {
+                        player.name = name
+                        let named = rosterNames.filter { HUDText.nameSimilarity($0.value, name) >= AffiliationTracker.teammateSimilarity }
+                            .max { HUDText.nameSimilarity($0.value, name) < HUDText.nameSimilarity($1.value, name) }?.key
+                        if let row = named ?? (hud.rosterRows == 1 ? 0 : nil), let vitals = hud.roster.first(where: { $0.row == row }), !vitals.down {
+                            player.health = vitals.health; player.shield = vitals.shield
+                        }
+                    }
                 }
                 o.players.append(player)
             case "wall","rock","tree","door","chest","revive_target":

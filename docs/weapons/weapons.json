@@ -1026,9 +1026,9 @@
    "name": "Healing Gun",
    "rarity": "Epic",
    "avail": "Crates, Gold Chests, Airdrops",
-   "effect": "Heals 12 health per shot (no shield); bounce shots off walls to heal yourself. 8 shots, no reload.",
+   "effect": "Heals 12 health per shot (no shield); bounce shots off walls to heal yourself. 8 shots, no reload. Prompt: \"Healing Weapon / Epic Unique\"; the readout shows a bare count.",
    "image": "healing_gun.png",
-   "seenInRecordings": false
+   "seenInRecordings": true
   },
   {
    "slug": "grappling_hook",
@@ -1154,7 +1154,7 @@
    "name": "Healing Grenade",
    "rarity": "Legendary",
    "stack": "2 / 6",
-   "effect": "Heals you and teammates in the area, about +5 several times a second (added Jun 2024).",
+   "effect": "Heals you and teammates in the area, not opponents (added Jun 2024). Measured: after about a second on the ground, a circle 0.118 view widths in radius heals health only, about 20/s (+5 four times a second), for 4.5 s.",
    "image": "healing_grenade.png",
    "seenInRecordings": true
   },
