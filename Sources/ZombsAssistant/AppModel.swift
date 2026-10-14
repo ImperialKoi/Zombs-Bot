@@ -28,6 +28,10 @@ struct FrameReport {
     var detectorMilliseconds: Double
     /// The healing item the assistant is selecting or using, nil otherwise.
     var healing: String?
+    /// A lethal grenade the assistant threw, and the seconds until it goes off; you are warned to keep clear.
+    var grenade: (name: String, seconds: Double)?
+    /// The grenade circle's radius in view heights, drawn on the preview.
+    var throwRadius: Double
 }
 
 final class ProcessingPipeline {
@@ -89,7 +93,8 @@ final class ProcessingPipeline {
                                  promptLines:result.promptLines,roster:result.roster,problems:result.problems,recognitionReady:result.recognitionReady,
                                  band:coordinator.currentBand,fps:performance.fps,latency:performance.p95,performancePasses:performance.passes(minimumFPS:PerformanceWindow.betaMinimumFPS),focusProblem:focusProblem,
                                  windowBounds:frame.windowBounds,contentRect:frame.contentRect,
-                                 hudMilliseconds:result.hudMilliseconds,detectorMilliseconds:result.detectorMilliseconds,healing:coordinator.healingItem))
+                                 hudMilliseconds:result.hudMilliseconds,detectorMilliseconds:result.detectorMilliseconds,healing:coordinator.healingItem,
+                                 grenade:coordinator.liveGrenade.map { ($0.name,max(0,$0.explodes-now)) },throwRadius:coordinator.settings.throwRadius))
         }
     }
 }
@@ -213,9 +218,13 @@ final class AppModel:ObservableObject {
     /// The label over the game: hidden when supervised input is off.
     private func updateBadge() {
         guard inputState != .off, capturing, let report else { badge.hide(); healPrompt.hide(); return }
-        // While the assistant heals, ask you to stand still, next to your character where you are looking.
+        // While the assistant heals, ask you to stand still, next to your character where you are looking. While one of its
+        // grenades is about to go off, warn you not to walk into it: explosions hurt you too.
         if inputState == .active, report.focusProblem == nil, !report.observation.manualOverride, let item=report.healing {
             healPrompt.show(title:"STOP MOVING",detail:"Healing with \(item)",color:.orange,windowBounds:report.windowBounds,contentRect:report.contentRect)
+        } else if inputState == .active, let grenade=report.grenade {
+            healPrompt.show(title:"GRENADE OUT",detail:String(format:"Keep clear: %@ goes off in %.1f s",grenade.name,grenade.seconds),color:.red,
+                            windowBounds:report.windowBounds,contentRect:report.contentRect)
         } else { healPrompt.hide() }
         let title:String, color:Color, detail:String
         switch inputState {

@@ -174,14 +174,14 @@ Damage and DPS are at the best rarity normally found. A range such as 10–15 is
 |---|---|---|---|---|
 | <img src="weapons/thors_hammer.png" width="64" alt="Thor's Hammer"> | **Thor's Hammer** | Mythic | Airdrop only | Thrown hammer: 45 direct / 25 splash, knocks players back. |
 | <img src="weapons/trident.png" width="64" alt="Trident of the Depths"> | **Trident of the Depths** | Mythic | Airdrop only | Thrown trident: 25 splash and pulls everyone in, like a Reverse Impulse. |
-| <img src="weapons/airstrike_gun.png" width="64" alt="Airstrike Gun"> | **Airstrike Gun** | Legendary | Gold Chests | Flare that calls ~5 s of explosions (9–10 each, stacking); hurts you too. |
+| <img src="weapons/airstrike_gun.png" width="64" alt="Airstrike Gun"> | **Airstrike Gun** | Legendary | Gold Chests | Flare that calls ~5 s of explosions (9–10 each, stacking); hurts you too. Recorded prompts show it as a throwable, "Airstrike / Legendary Grenade", in stacks of 5. |
 | <img src="weapons/healing_gun.png" width="64" alt="Healing Gun"> | **Healing Gun** | Epic | Crates, Gold Chests, Airdrops | Heals 12 health per shot (no shield); bounce shots off walls to heal yourself. 8 shots, no reload. |
 | <img src="weapons/grappling_hook.png" width="64" alt="Grappling Hook"> | **Grappling Hook** | Legendary | Crates, Gold Chests | Pulls you to the point you hit; 20 uses. |
 | <img src="weapons/turret.png" width="64" alt="Turret"> | **Turret** | Mythic | Vaulted; 50v50 Airdrops only | Thrown turret that fires at nearby enemies until destroyed. |
 
 ## Throwables
 
-Lethal grenades hurt you but not your teammates. Stack is the amount you find / the most you can carry.
+Lethal grenades hurt you but not your teammates. Stack is the amount you find / the most you can carry. All of them land where you click, except the Sticky Bomb, and none can be cooked. The prompt names them on a "<rarity> Grenade" line, for example "Reverse Impulse / Common Grenade".
 
 | | Throwable | Rarity | Stack | What it does |
 |---|---|---|---|---|
@@ -192,7 +192,7 @@ Lethal grenades hurt you but not your teammates. Stack is the amount you find / 
 | <img src="weapons/gassy_grenade.png" width="56" alt="Gassy Grenade"> | **Gassy Grenade** | Legendary | 3 / 9 | Poison cloud, 15 damage per second; clouds stack. |
 | <img src="weapons/incendiary_grenade.png" width="56" alt="Incendiary Grenade"> | **Incendiary Grenade** ● | Legendary | 3 / 9 | Ring of fire that burns, stacks like Gassy (added Aug 2024). |
 | <img src="weapons/impulse_grenade.png" width="56" alt="Impulse Grenade"> | **Impulse Grenade** ● | Common | 3 / 9 | Pushes players away; no damage. |
-| <img src="weapons/reverse_impulse_grenade.png" width="56" alt="Reverse Impulse Grenade"> | **Reverse Impulse Grenade** | Common | 3 / 9 | Pulls players to the blast; no damage. |
+| <img src="weapons/reverse_impulse_grenade.png" width="56" alt="Reverse Impulse Grenade"> | **Reverse Impulse Grenade** | Common | 3 / 9 | Pulls every player nearby to where it lands, you and teammates included, even through walls; no damage. The prompt calls it "Reverse Impulse". |
 | <img src="weapons/smoke_grenade.png" width="56" alt="Smoke Grenade"> | **Smoke Grenade** | Common | 3 / 9 | Smoke cloud that hides players and items; no damage. |
 | <img src="weapons/freeze_grenade.png" width="56" alt="Freeze Grenade"> | **Freeze Grenade** ● | Legendary | 3 / 3 | Slows, then freezes everyone in a small radius, you included. |
 | <img src="weapons/snowman_grenade.png" width="56" alt="Snowman Grenade"> | **Snowman Grenade** ● | Common–Legendary | 3 / 6 | Builds a hollow box of breakable snowmen as cover. |
@@ -242,7 +242,14 @@ Twelve more sprites in the atlases match no wiki page. They may be old designs o
 
 The catalog (`Sources/AssistantCore/Catalog.swift`) lists the 37 guns a prompt can name, with this ranking and the wiki's fire rate, reload and ammunition. A gun whose name is recognized gets a model ID such as `ar:rare:m4`; any other gun keeps a class ID such as `ar:rare` and counts as an average gun of its class.
 
-- **Pickups** compare power: 101 minus the rank at the gun's best normal rarity, 3 points per rarity step from there. A gun replaces one of its role when it is worth at least 1.5 more. So a Legendary UMP (97) replaces an Epic Pump Shotgun (82), and a Rare M4 (89) replaces a Rare AK (76).
+- **The loadout** the assistant works toward:
+  - a sniper, an AR and an SMG;
+  - one slot for a utility item or heals;
+  - one slot for heals.
+
+  A gun of the class the loadout wants for its range beats any other gun there. So an SMG replaces a shotgun however the two rank, an AR a pistol or LMG, and a sniper a DMR.
+- **Pickups** within a class compare power: 101 minus the rank at the gun's best normal rarity, 3 points per rarity step from there. A gun replaces one of its class when it is worth at least 1.5 more. So a Rare M4 (89) replaces a Rare AK (76).
+- **When the loadout needs a slot** (a missing gun, a first heal, a first utility item), what it has no place for goes first: a second gun for a range, then a second utility item. A missing gun may also take the slot of a second heal stack. With a full inventory and a potion needed now, your utility item is lent for the drink, else your weakest gun, and picked up again afterwards.
 - **Range bands** still prefer shotguns up close, assault rifles at mid range and snipers far away. Within that, a better gun of a class wins: the UMP over the MP5, the Semi-Auto Sniper over a Bolt Mk. II one rarity higher.
 - **Firing** uses each gun's own rate:
   - The Semi-Auto Sniper clicks four times a second.
@@ -252,6 +259,46 @@ The catalog (`Sources/AssistantCore/Catalog.swift`) lists the 37 guns a prompt c
 - Range, zoom and bullet speed stay class estimates, because the wiki only describes them in words.
 - Potions follow the stack sizes above. Below 50 health, or below 100 health and shield together, a potion that would help is picked up and drunk before any other loot.
 - The Stimpack stays manual. Its only use is just before a fight, which the assistant cannot time.
+
+### Reverse Impulse combos
+
+A Reverse Impulse goes off about 0.5 s after the throw and pulls the opponent to where it landed, so the assistant knows where they will be and when. With a Reverse Impulse in your inventory, it can finish a combo in these ways, best first:
+
+| Finisher | How it goes |
+|---|---|
+| **Frag Grenade** ("rev-nade") | The Frag goes off 2 s after the throw, so it goes **first**. The Reverse Impulse follows 1.15 s later at the same spot, timed to bring the opponent there just before the Frag explodes. |
+| **RGD-5 Grenade** | As quick as the pull, so the Reverse Impulse goes first and the RGD-5 0.35 s later. |
+| **RPG**, **Gift Launcher** | Fired at the spot so the rocket or presents arrive just as the opponent does. |
+| **XBow**, **Crossbow**, sniper, DMR | One shot at the spot, timed the same way. A pinned opponent is the easiest sniper target there is. |
+| **Shotgun** or **SMG** | Tight quarters: an opponent round a corner or behind a door, close enough to you. The Reverse Impulse lands **at your feet**, pulls them through the wall or door to you, and the shotgun (or, without one, the SMG) fires as they arrive. |
+| **Any other gun** (AR, SMG, LMG) | Only for an opponent behind cover: the pull brings them out into your line of fire. In the open, these guns just shoot. |
+
+What keeps you safe:
+
+- **Explosions hurt you too.** A Frag or RGD-5 never lands within its blast radius plus a margin of you, counting how your own movement will carry you until it goes off. An RPG, Gift Launcher or Assault SCAR round is never fired at a target, or past anything solid (wall, tree, rock, another player), that is that close to you. The Assault SCAR in an ordinary fight follows the same rule, so another gun takes over point-blank.
+- **The pull takes you along when you are inside it.** A Reverse Impulse lands either at your feet, where it leaves you in place and no explosion follows, or out of your reach. Before the second throw of a rev-nade, the assistant checks again: if you have walked toward the Frag, the Reverse Impulse is not thrown.
+- **Grenades bounce off walls.** Nothing is thrown through a wall, door, chest, tree or rock, or past a teammate.
+- **Nobody else gets pulled:** never a teammate, or a player not yet known to be an enemy.
+- While one of its grenades is about to go off, a red **GRENADE OUT** label above your character tells you to keep clear.
+- The input guard checks every throw and every shot at the spot again, independently.
+
+The game throws to where you click, so a throw lands within the **Grenade circle**: 60% of the view's height by default, about 0.34 view widths at 16:9 and 0.27 in a wide window. At its largest setting it covers the whole screen. Throws also obey these limits:
+- They stay 6% of the view's height away from every edge.
+- They never land on the HUD: the settings, sound and fullscreen buttons, the map button and minimap, your vitals, the inventory with its ammo counters, the team roster and the item panel.
+- Anything solid on the way limits a throw too: for an opponent behind a wall, the spot is on your side of it, and the pull brings them through.
+
+The pull's reach adds a little.
+
+**Estimated, not measured:** the Frag's 2 s and the RGD-5's 0.5 s fuses are the wiki's. The Reverse Impulse's 0.5 s is assumed equal to the Impulse's, as the wiki's combos imply. These are guesses to check in play:
+
+- Blast radii: Frag 0.08, RGD-5 0.065, RPG 0.07, Gift Launcher 0.04, Assault SCAR 0.035 view widths.
+- The pull's reach: 0.09.
+- How long a pull takes: 0.3 s.
+- Rocket and arrow speeds.
+
+The catalog in `Sources/AssistantCore/Catalog.swift`, or a tuned copy in `catalog.json`, holds them.
+
+Your loadout has room for **one utility item**, and the assistant picks one up when a free slot is not needed for a missing gun. The Reverse Impulse comes first, then the Frag, RGD-5, Sticky Bomb and Grappling Hook, then other grenades. It replaces a weaker one and stacks more of the same. A second grenade type that you pick up yourself, as a rev-nade needs, stays until the loadout needs its slot. Launcher and bow pickups stay manual. An Impulse, Sticky Bomb or any grenade it cannot name is never thrown, and a grenade it cannot name is never picked up. Unique weapons are named on the prompt rather than classed ("Gift Launcher / Legendary Unique", "Crossbow / Mythic Unique"). The assistant recognizes launchers, bows and throwables by name there. The Minigun's prompt also says "Legendary Unique", and it stays unrecognized, as before.
 
 ## Sources
 

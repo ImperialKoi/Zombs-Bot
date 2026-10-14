@@ -144,6 +144,8 @@ func run() throws {
                     case .reload: actions["reload", default: 0] += 1
                     case .useConsumable: actions["heal", default: 0] += 1
                     case .aim: actions["aim", default: 0] += 1
+                    case .throwAt: actions["throw", default: 0] += 1
+                    case .fireAtPull: actions["fire at pull", default: 0] += 1
                     case .releaseAll: break
                     }
                 }

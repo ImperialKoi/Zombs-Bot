@@ -1343,6 +1343,396 @@ struct AssistantCoreTests {
         expectEqual(decision.reason,"Opponent motion unknown"); expectFalse(decision.intents.contains(.fire))
         expectFalse(ActionGuard(profiles:engine().profiles).permits(.fire,observation:o,now:0,aim:target.position))
     }
+    // MARK: Reverse Impulse combos
+    /// A Solo fight with catalog items: a Rare M4 in slot 2, in hand, the given items in slots 3 to 6 (three of each
+    /// grenade), and one opponent standing still to your right, 0.2 view widths away unless said otherwise.
+    func comboFight(_ items:[String?],enemyAt x:Double=0.7)->(Coordinator,Observation) {
+        let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+        var o=observation()
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"ar:rare:m4",ammo:30,reserveAmmo:90)]+items.enumerated().map { i,id in
+            guard let id else { return InventorySlot(i+3,count:0) }
+            return ItemCatalog.parseWeaponID(id) != nil ? InventorySlot(i+3,itemID:id,ammo:5,reserveAmmo:10) : InventorySlot(i+3,itemID:id,count:3)
+        }
+        var foe=enemy();foe.position=Point(x,0.5);o.players=[foe]
+        return (c,o)
+    }
+    func thrown(_ decision:Decision)->Point? { decision.intents.compactMap { if case .throwAt(let p)=$0 { return p };return nil }.first }
+    func aimed(_ decision:Decision)->Point? { decision.intents.compactMap { if case .aim(let p)=$0 { return p };return nil }.first }
+    @Test func testRevNadeThrowsTheFragFirstAndThePullJustBeforeItGoesOff() throws {
+        var (c,o)=comboFight(["frag_grenade","reverse_impulse_grenade",nil,nil])
+        let guardrail=ActionGuard(profiles:c.profiles)
+        // A Frag goes off 2 s after the throw and the pull 0.5 s: the Frag goes first.
+        let start=step(c,o)
+        expectEqual(start.intents,[.releaseAll,.selectSlot(3)])
+        expectEqual(start.reason,"Rev-nade: Frag Grenade, then Reverse Impulse on the same spot: take Frag Grenade")
+        o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
+        o.timestamp=0.25;let first=step(c,o)
+        let spot=try #require(thrown(first))
+        // Where the opponent stands, well inside the grenade circle and clear of you.
+        #expect(abs(spot.y-0.5)<1e-9 && abs(spot.x-0.7)<1e-9)
+        expectTrue(guardrail.permits(.throwAt(spot),observation:o,now:0.25,aim:nil))
+        expectEqual(c.liveGrenade?.name,"Frag Grenade")
+        o.timestamp=0.3;expectEqual(step(c,o).intents,[]) // The click goes up where it was made.
+        o.timestamp=0.4;expectEqual(step(c,o).intents,[.releaseAll,.selectSlot(4)])
+        o.timestamp=0.45;o.selectedSlot=4;_=step(c,o)
+        o.timestamp=0.7;let waiting=step(c,o)
+        expectEqual(waiting.intents,[.releaseAll]);expectEqual(waiting.reason,"Rev-nade: Reverse Impulse in 0.7 s")
+        // The pull goes off 0.5 s after its throw and takes 0.3 s: thrown 1.15 s after the Frag, it brings the opponent to
+        // the spot just before the Frag goes off.
+        o.timestamp=1.38;expectEqual(step(c,o).intents,[.releaseAll])
+        o.timestamp=1.41;let second=step(c,o)
+        expectEqual(second.intents,[.releaseAll,.throwAt(spot)]);expectEqual(second.reason,"Rev-nade: Reverse Impulse on the spot")
+        expectTrue(guardrail.permits(.throwAt(spot),observation:o,now:1.41,aim:nil))
+        // Both are out: the fight goes on with the M4.
+        o.timestamp=1.55;expectTrue(step(c,o).intents.contains(.selectSlot(2)))
+    }
+    @Test func testAQuickRGD5FollowsThePull() throws {
+        var (c,o)=comboFight(["reverse_impulse_grenade","rgd5_grenade",nil,nil])
+        expectEqual(step(c,o).intents,[.releaseAll,.selectSlot(3)])
+        o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
+        o.timestamp=0.25;let spot=try #require(thrown(step(c,o)))
+        o.timestamp=0.4;expectEqual(step(c,o).intents,[.releaseAll,.selectSlot(4)])
+        o.timestamp=0.45;o.selectedSlot=4;_=step(c,o)
+        // An RGD-5 goes off 0.5 s after its throw: 0.35 s after the pull's throw, it goes off as the opponent lands.
+        o.timestamp=0.66;let bomb=step(c,o)
+        expectEqual(bomb.intents,[.releaseAll,.throwAt(spot)]);expectEqual(bomb.reason,"Rev-nade: RGD-5 Grenade on the spot")
+        expectTrue(ActionGuard(profiles:c.profiles).permits(.throwAt(spot),observation:o,now:0.66,aim:nil))
+        expectEqual(c.liveGrenade?.name,"RGD-5 Grenade")
+    }
+    @Test func testTheSpotMovesWithYouThroughEverySlotSwitchFrame() throws {
+        var (c,o)=comboFight(["reverse_impulse_grenade","rgd5_grenade",nil,nil])
+        _=step(c,o);o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
+        o.timestamp=0.25;let spot=try #require(thrown(step(c,o)))
+        o.timestamp=0.4;_=step(c,o) // Asks for slot 4.
+        // You walk on while the RGD-5 comes to hand: every frame's scenery shift moves the spot, not only the last one's.
+        for (time,selected) in [(0.45,3),(0.5,4),(0.55,4)] {
+            o.timestamp=time;o.selectedSlot=selected;o.sceneryShift=Point(-0.005,0);o.players[0].position.x -= 0.005
+            expectEqual(step(c,o).reason,"Waiting for selected slot")
+        }
+        o.timestamp=0.62;o.sceneryShift=Point(-0.005,0);o.players[0].position.x -= 0.005
+        let bomb=try #require(thrown(step(c,o)))
+        #expect(abs(bomb.x-(spot.x-0.02))<1e-9 && abs(bomb.y-spot.y)<1e-9)
+    }
+    @Test func testASniperShotIsTimedToArriveWithThePulledOpponent() throws {
+        var (c,o)=comboFight(["reverse_impulse_grenade","sniper:rare:bolt_mk2",nil,nil])
+        expectEqual(step(c,o).reason,"Combo: Reverse Impulse, then Rare Bolt Mk. II Sniper as the opponent lands: take Reverse Impulse")
+        o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
+        o.timestamp=0.25;let spot=try #require(thrown(step(c,o)))
+        o.timestamp=0.4;expectEqual(step(c,o).intents,[.releaseAll,.selectSlot(4)])
+        // The sniper zooms the view out 1.2×, which brings the spot and the opponent closer to you on screen.
+        o.timestamp=0.45;o.selectedSlot=4;o.players[0].position=Point(0.5+0.2/1.2,0.5);_=step(c,o)
+        o.timestamp=0.75;let early=step(c,o)
+        expectEqual(early.intents.first,.releaseAll);expectFalse(early.intents.contains(.fireAtPull))
+        #expect(aimed(early).map { abs($0.x-(0.5+(spot.x-0.5)/1.2))<1e-9 } == true)
+        // The opponent lands 0.86 s after the throw; the bullet flies about 0.19 s. It is fired so as to arrive just after.
+        o.timestamp=0.93;let shot=step(c,o)
+        expectTrue(shot.intents.contains(.fireAtPull))
+        let aim=try #require(aimed(shot))
+        expectTrue(ActionGuard(profiles:c.profiles).permits(.fireAtPull,observation:o,now:0.93,aim:aim))
+        // One shot, then ordinary fighting.
+        o.timestamp=0.96;expectFalse(step(c,o).intents.contains(.fireAtPull))
+    }
+    @Test func testAnyGunFinishesAPullThatBringsAnOpponentOutFromCover() {
+        // In the open, the M4 just fires: a pull would gain it nothing.
+        var (c,o)=comboFight(["reverse_impulse_grenade",nil,nil,nil])
+        expectTrue(step(c,o).intents.contains(.fire))
+        // Behind a wall the M4 cannot shoot through, the pull brings the opponent out to your side of it.
+        (c,o)=comboFight(["reverse_impulse_grenade",nil,nil,nil],enemyAt:0.75)
+        o.obstacles=[.init(.wall,bounds:.init(0.715,0.4,0.02,0.2))]
+        let start=step(c,o)
+        expectEqual(start.intents,[.releaseAll,.selectSlot(3)])
+        expectEqual(start.reason,"Combo: Reverse Impulse, then Rare M4 as the opponent lands: take Reverse Impulse")
+        o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
+        o.timestamp=0.25;#expect(thrown(step(c,o)).map { $0.x<0.707 } == true)
+    }
+    @Test func testAPullAtYourFeetBringsAnOpponentThroughADoorToYourShotgun() throws {
+        var (c,o)=comboFight(["reverse_impulse_grenade","shotgun:rare:pump_shotgun",nil,nil],enemyAt:0.56)
+        o.obstacles=[.init(.door,bounds:.init(0.53,0.45,0.012,0.1))]
+        expectEqual(step(c,o).reason,"Combo: Reverse Impulse at your feet, then Rare Pump Shotgun: take Reverse Impulse")
+        o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
+        o.timestamp=0.25;let feet=try #require(thrown(step(c,o)))
+        #expect(abs(feet.distance(to:o.player,aspect:o.aspect)-Combos.feetOffset)<1e-9 && feet.x>0.5)
+        expectTrue(ActionGuard(profiles:c.profiles).permits(.throwAt(feet),observation:o,now:0.25,aim:nil))
+        o.timestamp=0.4;expectEqual(step(c,o).intents,[.releaseAll,.selectSlot(4)])
+        o.timestamp=0.45;o.selectedSlot=4;_=step(c,o)
+        o.timestamp=0.7;expectFalse(step(c,o).intents.contains(.fireAtPull)) // Still on the way.
+        o.timestamp=1.09;let blast=step(c,o)
+        expectTrue(blast.intents.contains(.fireAtPull))
+        expectTrue(ActionGuard(profiles:c.profiles).permits(.fireAtPull,observation:o,now:1.09,aim:feet))
+    }
+    @Test func testABlastNeverLandsNearYou() {
+        // An opponent 0.05 view widths away: a Frag that caught them would catch you too, so the M4 fights instead.
+        var (c,o)=comboFight(["frag_grenade","reverse_impulse_grenade",nil,nil],enemyAt:0.55)
+        expectTrue(step(c,o).intents.contains(.fire))
+        // The input guard refuses such a throw by itself: a Frag's blast reaches 0.08, plus a margin of 0.04.
+        o.selectedSlot=3
+        let guardrail=ActionGuard(profiles:c.profiles)
+        expectFalse(guardrail.permits(.throwAt(Point(0.55,0.5)),observation:o,now:0,aim:nil))
+        expectFalse(guardrail.permits(.throwAt(Point(0.6,0.5)),observation:o,now:0,aim:nil))
+        expectTrue(guardrail.permits(.throwAt(Point(0.65,0.5)),observation:o,now:0,aim:nil))
+    }
+    @Test func testAPullNeverDragsYouIntoYourOwnFrag() {
+        var (c,o)=comboFight(["frag_grenade","reverse_impulse_grenade",nil,nil])
+        _=step(c,o);o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
+        o.timestamp=0.25;_=step(c,o) // The Frag is out.
+        o.timestamp=0.4;_=step(c,o);o.timestamp=0.45;o.selectedSlot=4;_=step(c,o)
+        // You walk toward the spot: the scenery, the Frag and the opponent slide toward you on screen.
+        o.timestamp=1.41;o.sceneryShift=Point(-0.08,0);o.players[0].position.x -= 0.08
+        let decision=step(c,o)
+        expectEqual(decision.reason,"Rev-nade off: Reverse Impulse would pull you into your own Frag Grenade")
+        expectEqual(thrown(decision),nil)
+    }
+    @Test func testARevNadeGivesUpOnAnOpponentWhoRunsOff() {
+        var (c,o)=comboFight(["frag_grenade","reverse_impulse_grenade",nil,nil])
+        _=step(c,o);o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
+        o.timestamp=0.25;_=step(c,o) // The Frag is out.
+        o.timestamp=0.4;_=step(c,o);o.timestamp=0.45;o.selectedSlot=4;_=step(c,o)
+        // Running at full speed away from the Frag: no pull will catch them, so the guns take over.
+        o.timestamp=0.7;o.players[0].position.x=0.62;o.players[0].velocity=Point(-0.18,0);o.players[0].motion = .init(groundVelocity:Point(-0.18,0))
+        expectEqual(step(c,o).reason,"Rev-nade off: the opponent got away from the Frag Grenade")
+        o.timestamp=0.75;expectTrue(step(c,o).intents.contains(.selectSlot(2)))
+    }
+    @Test func testGrenadesAreNeverThrownAtSomethingTheyWouldBounceOff() {
+        // A tree on the line would stop a grenade or send it back at you. Bullets still go for the opponent.
+        var (c,o)=comboFight(["frag_grenade","reverse_impulse_grenade","sniper:rare:bolt_mk2",nil])
+        o.obstacles=[.init(.tree,bounds:.init(0.6,0.45,0.03,0.1))]
+        expectTrue(step(c,o).intents.contains(.fire))
+        o.selectedSlot=3
+        expectFalse(ActionGuard(profiles:c.profiles).permits(.throwAt(Point(0.69,0.5)),observation:o,now:0,aim:nil))
+    }
+    @Test func testExplodingRoundsNeverGoOffNearYou() {
+        let catalog=ItemCatalog.standard
+        let scar=catalog.profile("ar:mythic:assault_scar")!, rpg=catalog.profile("launcher:rare:rpg")!, m4=catalog.profile("ar:rare:m4")!
+        var o=observation()
+        // The target itself, or anything solid on the way within the explosion's reach of you, is too close.
+        expectTrue(Policy.explosiveSafe(o,weapon:rpg,toward:Point(0.7,0.5),zoom:1))
+        expectFalse(Policy.explosiveSafe(o,weapon:rpg,toward:Point(0.58,0.5),zoom:1))
+        o.obstacles=[.init(.wall,bounds:.init(0.54,0.45,0.02,0.1))]
+        expectFalse(Policy.explosiveSafe(o,weapon:rpg,toward:Point(0.7,0.5),zoom:1)) // The rocket would hit the wall beside you.
+        o.obstacles=[.init(.tree,bounds:.init(0.54,0.45,0.02,0.1))]
+        expectFalse(Policy.explosiveSafe(o,weapon:scar,toward:Point(0.7,0.5),zoom:1))
+        expectTrue(Policy.explosiveSafe(o,weapon:m4,toward:Point(0.53,0.5),zoom:1)) // Ordinary bullets do not explode.
+        // In a fight, the Assault SCAR is not fired at an opponent right next to you; an SMG is taken instead.
+        let c=Coordinator(catalog:catalog);c.features.idleWeapon=false
+        var fight=observation()
+        fight.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"ar:mythic:assault_scar",ammo:30,reserveAmmo:90),.init(3,count:0),.init(4,count:0),.init(5,count:0),.init(6,count:0)]
+        var foe=enemy();foe.position=Point(0.53,0.5);fight.players=[foe]
+        let held=step(c,fight)
+        expectFalse(held.intents.contains(.fire));expectEqual(held.reason,"Not firing Mythic Assault SCAR: its explosion would hit you too")
+        expectFalse(ActionGuard(profiles:c.profiles).permits(.fire,observation:fight,now:0,aim:foe.position))
+        fight.inventory[2] = .init(3,itemID:"smg:rare:mp5",ammo:30,reserveAmmo:90);fight.timestamp=0.1
+        expectTrue(step(c,fight).intents.contains(.selectSlot(3)))
+    }
+    @Test func testTheInputGuardRefusesUnsafeOrPointlessThrows() {
+        let (c,base)=comboFight(["frag_grenade","reverse_impulse_grenade","throwable","impulse_grenade"],enemyAt:0.6)
+        let guardrail=ActionGuard(profiles:c.profiles)
+        var o=base;o.selectedSlot=4 // The Reverse Impulse in hand.
+        expectTrue(guardrail.permits(.throwAt(Point(0.52,0.5)),observation:o,now:0,aim:nil)) // At your feet: you stay put.
+        expectFalse(guardrail.permits(.throwAt(Point(0.56,0.5)),observation:o,now:0,aim:nil)) // It would drag you along.
+        expectTrue(guardrail.permits(.throwAt(Point(0.65,0.5)),observation:o,now:0,aim:nil))
+        expectTrue(guardrail.permits(.throwAt(Point(0.72,0.5)),observation:o,now:0,aim:nil)) // Past the crosshair circle, within the grenade circle.
+        o.players[0].position.x=0.82;expectFalse(guardrail.permits(.throwAt(Point(0.85,0.5)),observation:o,now:0,aim:nil)) // Beyond it.
+        o=base;o.selectedSlot=4
+        expectFalse(guardrail.permits(.throwAt(Point(0.5,0.5-0.15*o.aspect)),observation:o,now:0,aim:nil)) // Nobody there.
+        o.gunInHand=true;expectFalse(guardrail.permits(.throwAt(Point(0.65,0.5)),observation:o,now:0,aim:nil)) // A gun would fire.
+        o=base;o.selectedSlot=4;o.teamMode=true;o.players.append(.init(id:2,position:.init(0.66,0.52),affiliation:.teammate))
+        expectFalse(guardrail.permits(.throwAt(Point(0.65,0.5)),observation:o,now:0,aim:nil)) // It would catch your teammate.
+        // A throwable of unknown name and an Impulse are never thrown.
+        for slot in [5,6] { o=base;o.selectedSlot=slot;expectFalse(guardrail.permits(.throwAt(Point(0.65,0.5)),observation:o,now:0,aim:nil)) }
+        // Nor anything through a wall, which would send it back at you.
+        o=base;o.selectedSlot=3;o.obstacles=[.init(.wall,bounds:.init(0.6,0.4,0.01,0.2))]
+        expectFalse(guardrail.permits(.throwAt(Point(0.65,0.5)),observation:o,now:0,aim:nil))
+    }
+    @Test func testGrenadeAndUniqueWeaponPromptsNameTheItem() {
+        let catalog=ItemCatalog.standard
+        func id(_ lines:[String])->String? { HUDText.prompt(lines:lines,confidence:1,catalog:catalog,key:"E")?.itemID }
+        // As recorded: the stack badge, the name, the key and the subtitle.
+        expectEqual(id(["X3","Reverse Impulse","E","Common Grenade"]),"reverse_impulse_grenade")
+        expectEqual(id(["X3","Impulse Grenade","E","Common Grenade"]),"impulse_grenade")
+        expectEqual(id(["Frag Grenade","E","Common Grenade"]),"frag_grenade")
+        expectEqual(id(["x5","RGD-5 Grenade","E","Common Grenade"]),"rgd5_grenade")
+        expectEqual(id(["RGD-S Grenade","Common Grenade"]),"rgd5_grenade") // A look-alike character.
+        expectEqual(id(["X3","Sticky Bomb","E","Epic Grenade"]),"sticky_bomb")
+        expectEqual(id(["Mystery Grenade","Common Grenade"]),ItemCatalog.throwableID)
+        // Unique items are named, not classed.
+        expectEqual(id(["Gift Launcher","E","Legendary Unique"]),"launcher:legendary:gift_launcher")
+        expectEqual(id(["Crossbow","E","Mythic Unique"]),"special:mythic:crossbow")
+        expectEqual(id(["Grossbow","E","Mythid Unique"]),"special:mythic:crossbow") // As misread in a recording.
+        expectEqual(id(["X30","Shuriken","E","Legendary Unique"]),"shuriken")
+        expectEqual(HUDText.prompt(lines:["Minigun","E","Legendary Unique"],confidence:1,catalog:catalog)?.kind,.other)
+        let rev=catalog.profile("reverse_impulse_grenade")!, frag=catalog.profile("frag_grenade")!
+        expectEqual(rev.effect,.pull);expectEqual(frag.effect,.blast);expectTrue(rev.isValid && frag.isValid)
+        expectGreater(frag.fuse,rev.fuse+rev.pullDuration) // So the Frag goes first.
+        expectEqual(catalog.profile("launcher:rare:rpg")!.radius,0.07)
+        expectEqual(catalog.profile("ar:mythic:assault_scar")!.radius,0.035)
+        expectTrue(catalog.profiles.allSatisfy(\.isValid))
+    }
+    @Test func testCombosWaitTheirTurn() {
+        // Turned off, the M4 just fires.
+        var (c,o)=comboFight(["reverse_impulse_grenade","rgd5_grenade",nil,nil])
+        c.features.combos=false;expectTrue(step(c,o).intents.contains(.fire))
+        // After a combo, the next one waits 3 s.
+        (c,o)=comboFight(["reverse_impulse_grenade","rgd5_grenade",nil,nil])
+        _=step(c,o);o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
+        o.timestamp=0.25;_=step(c,o);o.timestamp=0.4;_=step(c,o);o.timestamp=0.45;o.selectedSlot=4;_=step(c,o)
+        o.timestamp=0.66;_=step(c,o) // The RGD-5 is out.
+        o.timestamp=0.8;expectTrue(step(c,o).intents.contains(.selectSlot(2))) // Back to the M4.
+        o.timestamp=0.85;o.selectedSlot=2;_=step(c,o)
+        o.timestamp=1.1;expectTrue(step(c,o).intents.contains(.fire))
+        o.timestamp=3.7;expectTrue(step(c,o).intents.contains(.fire))
+        o.timestamp=3.85;expectEqual(step(c,o).intents,[.releaseAll,.selectSlot(3)])
+    }
+    @Test func testYourOwnSlotChoiceEndsACombo() {
+        var (c,o)=comboFight(["frag_grenade","reverse_impulse_grenade",nil,nil])
+        _=step(c,o);o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
+        o.timestamp=0.25;_=step(c,o) // The Frag is out.
+        o.timestamp=0.3;o.selectedSlot=2 // You press 2 yourself.
+        expectEqual(step(c,o).reason,"Combo stopped: you changed slots")
+    }
+    @Test func testAnSMGFinishesAPullAtYourFeetToo() throws {
+        // Your loadout's SMG instead of a shotgun: the opponent behind the door comes to it, and it keeps firing as they land.
+        var (c,o)=comboFight(["reverse_impulse_grenade","smg:rare:ump",nil,nil],enemyAt:0.56)
+        o.obstacles=[.init(.door,bounds:.init(0.53,0.45,0.012,0.1))]
+        expectEqual(step(c,o).reason,"Combo: Reverse Impulse at your feet, then Rare UMP: take Reverse Impulse")
+        o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
+        o.timestamp=0.25;_=try #require(thrown(step(c,o)))
+        o.timestamp=0.4;_=step(c,o);o.timestamp=0.45;o.selectedSlot=4;_=step(c,o)
+        for t in [1.09,1.2,1.3] { o.timestamp=t;expectTrue(step(c,o).intents.contains(.fireAtPull)) }
+        o.timestamp=1.6;expectFalse(step(c,o).intents.contains(.fireAtPull)) // The window is over.
+    }
+    @Test func testAComboSpotStaysOffTheHUD() throws {
+        // A HUD element over the opponent: the spot lands short of it, near enough for the pull.
+        var (c,o)=comboFight(["reverse_impulse_grenade","sniper:rare:bolt_mk2",nil,nil])
+        o.hudAreas=[.init(0.65,0.3,0.1,0.4)]
+        _=step(c,o);o.timestamp=0.05;o.selectedSlot=3;_=step(c,o)
+        o.timestamp=0.25;let spot=try #require(thrown(step(c,o)))
+        #expect(spot.x<0.65 && spot.x>0.6)
+        expectTrue(ActionGuard(profiles:c.profiles).permits(.throwAt(spot),observation:o,now:0.25,aim:nil))
+        expectFalse(ActionGuard(profiles:c.profiles).permits(.throwAt(Point(0.7,0.5)),observation:o,now:0.25,aim:nil))
+    }
+    // MARK: Safe clicks
+    @Test func testClicksNeverLandNearTheEdgesOrOnTheHUD() {
+        var o=observation()
+        // As the HUD layout reports them: the buttons at the top left, the inventory at the bottom right, the item panel.
+        o.hudAreas=[.init(0,0,0.13,0.08),.init(0.74,0.78,0.26,0.22),.init(0.43,0.64,0.14,0.1)]
+        expectTrue(Policy.clickable(Point(0.6,0.4),in:o))
+        expectFalse(Policy.clickable(Point(0.05,0.03),in:o)) // A button.
+        expectFalse(Policy.clickable(Point(0.8,0.9),in:o))   // An inventory slot.
+        expectFalse(Policy.clickable(Point(0.5,0.68),in:o))  // The item panel.
+        expectFalse(Policy.clickable(Point(0.3,0.97),in:o))  // Near the bottom edge.
+        expectFalse(Policy.clickable(Point(0.98,0.4),in:o))  // Near the right edge.
+        // The crosshair keeps its direction but steps back off the panel.
+        let down=Targeting.cursor(toward:Point(0.5,0.7),from:o.player,aspect:o.aspect,radius:0.35,avoiding:o.hudAreas)
+        #expect(abs(down.point.x-0.5)<1e-9 && down.point.y<0.64 && down.point.y>0.55 && abs(down.angle-Double.pi/2)<1e-9)
+        // Throws land within the grenade circle, 60% of the view's height by default, where a click is safe.
+        var s=CombatSettings()
+        expectTrue(Policy.throwClickable(Point(0.8,0.5),in:o,settings:s))
+        expectFalse(Policy.throwClickable(Point(0.86,0.5),in:o,settings:s))
+        s.throwRadius=1.25 // At its largest, anywhere but near the edges and on the HUD.
+        expectTrue(Policy.throwClickable(Point(0.95,0.5),in:o,settings:s))
+        expectFalse(Policy.throwClickable(Point(0.99,0.5),in:o,settings:s))
+        expectFalse(Policy.throwClickable(Point(0.8,0.9),in:o,settings:s))
+        s.throwRadius=1.3;expectFalse(s.isValid)
+    }
+    // MARK: Loadout
+    /// A sniper, an M4 and an MP5 in slots 2 to 4, the given items in slots 5 and 6, the sniper in hand.
+    func kitted(_ five:String?,_ six:String?)->(Coordinator,Observation) {
+        let c=Coordinator(catalog:.standard);c.features.idleWeapon=false
+        var o=observation();o.selectedSlot=2
+        let rest:[InventorySlot]=[five,six].enumerated().map { i,id in
+            guard let id else { return InventorySlot(i+5,count:0) }
+            return ItemCatalog.parseWeaponID(id) != nil ? InventorySlot(i+5,itemID:id,ammo:30,reserveAmmo:60) : InventorySlot(i+5,itemID:id)
+        }
+        o.inventory=[.init(1,itemID:"fists"),.init(2,itemID:"sniper:rare:bolt_mk2",ammo:5,reserveAmmo:10),.init(3,itemID:"ar:rare:m4",ammo:30,reserveAmmo:90),
+                     .init(4,itemID:"smg:rare:mp5",ammo:30,reserveAmmo:90)]+rest
+        return (c,o)
+    }
+    func grenadePrompt(_ name:String,_ subtitle:String="Common Grenade")->InteractionPrompt? {
+        HUDText.prompt(lines:["X3",name,"E",subtitle],confidence:1,catalog:.standard,key:"E")
+    }
+    @Test func testTheLoadoutWantsASniperAnARAndAnSMG() {
+        // A Common Uzi takes the place of a Legendary Pump Shotgun, though the ranking puts the shotgun higher.
+        var (c,o)=stocked("shotgun:legendary:pump_shotgun","ar:rare:m4","sniper:rare:bolt_mk2");o.prompt=gunPrompt("Uzi","Common SMG")
+        expectEqual(step(c,o).reason,"Select slot 2 to swap for Uzi")
+        // A shotgun never takes an SMG's place, however good.
+        (c,o)=stocked("smg:common:uzi","ar:rare:m4","sniper:rare:bolt_mk2");o.prompt=gunPrompt("Pump Shotgun","Legendary Shotgun")
+        expectEqual(step(c,o).reason,"Not picking up Legendary Pump Shotgun: not better than Common Uzi")
+        // An AR takes a pistol's place, a sniper a DMR's.
+        (c,o)=stocked("smg:rare:mp5","pistol:legendary:deagle","sniper:rare:bolt_mk2");o.prompt=gunPrompt("AK","Common AR")
+        expectEqual(step(c,o).reason,"Select slot 3 to swap for AK")
+        (c,o)=stocked("smg:rare:mp5","ar:rare:m4","dmr:legendary");o.prompt=gunPrompt("Hunting Rifle","Common Sniper")
+        expectEqual(step(c,o).reason,"Select slot 4 to swap for Hunting Rifle")
+        // With no close-range gun yet, a shotgun is still welcome.
+        (c,o)=kitted(nil,nil);o.inventory[3] = .init(4,count:0);o.prompt=gunPrompt("Pump Shotgun","Rare Shotgun")
+        expectEqual(step(c,o).reason,"Pick up Rare Pump Shotgun for close range")
+    }
+    @Test func testTheLoadoutCarriesOneUtilityItem() {
+        // A free slot takes a Reverse Impulse; the other stays for heals.
+        var (c,o)=kitted(nil,nil);o.prompt=grenadePrompt("Reverse Impulse")
+        var d=step(c,o);expectTrue(d.intents.contains(.pickup("Reverse Impulse")));expectEqual(d.reason,"Pick up Reverse Impulse for your utility slot")
+        expectTrue(ActionGuard(profiles:c.profiles).permits(.pickup("Reverse Impulse"),observation:o,now:0,aim:nil))
+        // One utility item: a Frag does not join a Reverse Impulse…
+        (c,o)=kitted("reverse_impulse_grenade",nil);o.prompt=grenadePrompt("Frag Grenade")
+        expectEqual(step(c,o).reason,"Not picking up Frag Grenade: your utility slot holds Reverse Impulse")
+        // …but a Reverse Impulse replaces a Smoke Grenade.
+        (c,o)=kitted("smoke_grenade","hybrid_potion");o.prompt=grenadePrompt("Reverse Impulse")
+        expectEqual(step(c,o).reason,"Select slot 5 to swap for Reverse Impulse")
+        // Two heals keep their slots: nothing is dropped for a grenade.
+        (c,o)=kitted("hybrid_potion","small_shield");o.prompt=grenadePrompt("Reverse Impulse")
+        expectEqual(step(c,o).reason,"Not picking up Reverse Impulse: inventory full")
+        // More of the one carried joins its stack when it has room.
+        (c,o)=kitted("reverse_impulse_grenade","hybrid_potion");o.inventory[4].count=3;o.prompt=grenadePrompt("Reverse Impulse")
+        d=step(c,o);expectTrue(d.intents.contains(.pickup("Reverse Impulse")));expectEqual(d.reason,"Pick up Reverse Impulse: 3 of 9 held")
+        // A Grappling Hook is utility too ("Legendary Unique" on its prompt).
+        (c,o)=kitted(nil,"hybrid_potion");o.prompt=HUDText.prompt(lines:["X15","Grappling Hook","E","Legendary Unique"],confidence:1,catalog:.standard,key:"E")
+        expectEqual(step(c,o).reason,"Pick up Grappling Hook for your utility slot")
+        // A grenade it cannot name is never picked up.
+        (c,o)=kitted(nil,nil);o.prompt=grenadePrompt("Mystery Grenade")
+        expectFalse(step(c,o).intents.contains(.pickup("Mystery Grenade")))
+        expectFalse(ActionGuard(profiles:c.profiles).permits(.pickup("Mystery Grenade"),observation:o,now:0,aim:nil))
+    }
+    @Test func testWhatTheLoadoutHasNoPlaceForMakesWayFirst() {
+        // No SMG yet, and two utility items: the weaker one goes for the SMG.
+        var (c,o)=kitted("frag_grenade","hybrid_potion");o.inventory[3] = .init(4,itemID:"reverse_impulse_grenade",count:3);o.prompt=gunPrompt("MP5","Rare SMG")
+        expectEqual(step(c,o).reason,"Select slot 5 to swap for MP5")
+        // One utility item and two heals: the heal that helps least goes; a utility item and a heal stay.
+        (c,o)=kitted("small_shield","hybrid_potion");o.inventory[3] = .init(4,itemID:"reverse_impulse_grenade",count:3);o.shield=40;o.prompt=gunPrompt("MP5","Rare SMG")
+        expectEqual(step(c,o).reason,"Select slot 5 to swap for MP5")
+        // A potion takes the place of a second SMG.
+        (c,o)=kitted("smg:common:uzi","reverse_impulse_grenade");o.prompt=potionPrompt(["Hybrid Potion","Healing"])
+        expectEqual(step(c,o).reason,"Select slot 5 to swap for Hybrid Potion")
+        // So does a grenade, when there is no utility item yet.
+        (c,o)=kitted("smg:common:uzi","hybrid_potion");o.prompt=grenadePrompt("Reverse Impulse")
+        expectEqual(step(c,o).reason,"Select slot 5 to swap for Reverse Impulse")
+    }
+    @Test func testToHealItLendsTheUtilitySlotAndTakesItsItemBack() {
+        // Nothing held helps (the shield is full), so the Reverse Impulse makes room for the Med Kit, not a gun.
+        var (c,o)=kitted("reverse_impulse_grenade","small_shield");o.inventory[4].count=3;o.health=60
+        o.prompt=potionPrompt(["Med Kit","Healing"])
+        _=step(c,o);o.timestamp=2.1
+        expectEqual(step(c,o).reason,"Select slot 5 to swap for Med Kit")
+        o.timestamp=2.15;o.selectedSlot=5;expectTrue(step(c,o).intents.contains(.pickup("Med Kit")))
+        // It is drunk while the Reverse Impulses lie on the ground…
+        o.timestamp=2.2;o.inventory[4] = .init(5,itemID:"medkit");o.prompt=grenadePrompt("Reverse Impulse");_=step(c,o)
+        o.timestamp=2.45;expectEqual(step(c,o).reason,"Start healing with Med Kit")
+        o.timestamp=7.6;o.health=100;o.inventory[4] = .init(5,count:0);expectEqual(step(c,o).reason,"Healing confirmed")
+        // …and then picked up again.
+        o.timestamp=7.7;let back=step(c,o)
+        expectTrue(back.intents.contains(.pickup("Reverse Impulse")))
+        expectTrue(ActionGuard(profiles:c.profiles).permits(.pickup("Reverse Impulse"),observation:o,now:7.7,aim:nil))
+    }
+    @Test func testASpotOnTheGroundFollowsTheView() {
+        var o=observation()
+        var mark=GroundMark(Point(0.7,0.5),zoom:1,time:0)
+        o.timestamp=0.1;o.sceneryShift=Point(-0.02,0.01);mark.follow(o,zoom:1)
+        #expect(abs(mark.point.x-0.68)<1e-12 && abs(mark.point.y-0.51)<1e-12)
+        // Without a measured shift, your last velocity carries it the other way.
+        o.timestamp=0.2;o.sceneryShift=nil;o.ownVelocity=Point(0.1,0);mark.follow(o,zoom:1)
+        #expect(abs(mark.point.x-0.67)<1e-12)
+        // A sniper zooms the view out 1.2×: the spot comes closer to you on screen.
+        o.timestamp=0.3;mark.follow(o,zoom:1.2)
+        #expect(abs(mark.point.x-(0.5+0.17/1.2))<1e-12)
+    }
 }
 
 private func expectEqual<T:Equatable>(_ actual:T,_ expected:T,_ message:String="",file:StaticString=#filePath,line:UInt=#line) {

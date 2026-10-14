@@ -33,7 +33,8 @@ public struct ItemIdentity: Codable, Equatable, Hashable, Sendable {
         switch kind {
         case .weapon: return weaponClass.map { catalog.weaponID($0, rarity ?? .common, name: name) }
         case .healing: return healID
-        case .throwable: return ItemCatalog.throwableID
+        // A throwable is thrown only when its name is known: a Frag taken for a Reverse Impulse would land at your feet.
+        case .throwable: return catalog.throwable(named: name)?.id ?? ItemCatalog.throwableID
         case .melee: return ItemCatalog.fistsID
         }
     }
@@ -65,6 +66,16 @@ public final class IconLibrary: @unchecked Sendable {
         let shape = a.shapeSimilarity(b)
         return kind == .weapon ? shape : 0.65 * shape + 0.35 * a.colorSimilarity(b)
     }
+    /// Items of a different kind: another weapon class, another consumable, a throwable against a gun.
+    static func otherKind(_ a: ItemIdentity, _ b: ItemIdentity) -> Bool {
+        a.kind != b.kind || a.weaponClass != b.weaponClass || a.healID != b.healID
+    }
+    /// Different items, as far as an icon can tell. Throwables also differ by name: a Reverse Impulse and an Impulse
+    /// share a shape, and a Reverse Impulse may be thrown at your feet, where nothing else must land. Names that differ
+    /// only in characters text recognition confuses are one item.
+    static func differ(_ a: ItemIdentity, _ b: ItemIdentity) -> Bool {
+        otherKind(a, b) || a.kind == .throwable && ItemCatalog.shapeKey(a.name) != ItemCatalog.shapeKey(b.name)
+    }
 
     public func match(_ fingerprint: IconFingerprint) -> (identity: ItemIdentity, similarity: Double)? {
         lock.lock(); defer { lock.unlock() }
@@ -76,10 +87,12 @@ public final class IconLibrary: @unchecked Sendable {
         let ranked = best.sorted { $0.value > $1.value }
         guard let top = ranked.first, top.value >= Self.matchThreshold else { return nil }
         let close = ranked.dropFirst().filter { top.value - $0.value < Self.matchMargin }
-        if close.contains(where: { $0.key.kind != top.key.kind || $0.key.weaponClass != top.key.weaponClass || $0.key.healID != top.key.healID }) { return nil }
+        if close.contains(where: { Self.otherKind($0.key, top.key) }) { return nil }
         // Another gun of the same class about as close: the class is certain, the gun is not. A name decides how good
         // the gun is, so it is left out rather than guessed. Names that differ only in OCR'd look-alikes are one gun.
-        if top.key.kind == .weapon, close.contains(where: { ItemCatalog.shapeKey($0.key.name) != ItemCatalog.shapeKey(top.key.name) }) {
+        // Likewise a throwable as close to another one stays unnamed, and an unnamed throwable is never thrown.
+        if top.key.kind == .weapon || top.key.kind == .throwable,
+           close.contains(where: { ItemCatalog.shapeKey($0.key.name) != ItemCatalog.shapeKey(top.key.name) }) {
             var unnamed = top.key; unnamed.name = ""
             return (unnamed, top.value)
         }
@@ -91,7 +104,7 @@ public final class IconLibrary: @unchecked Sendable {
     @discardableResult
     public func learn(_ identity: ItemIdentity, _ fingerprint: IconFingerprint) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        if entries.contains(where: { $0.identity.kind != identity.kind || $0.identity.weaponClass != identity.weaponClass || $0.identity.healID != identity.healID ? Self.similarity(fingerprint, $0.fingerprint, kind: $0.identity.kind) >= 0.97 : false }) {
+        if entries.contains(where: { Self.differ($0.identity, identity) ? Self.similarity(fingerprint, $0.fingerprint, kind: $0.identity.kind) >= 0.97 : false }) {
             return false
         }
         if let i = entries.indices.first(where: { entries[$0].identity == identity && Self.similarity(fingerprint, entries[$0].fingerprint, kind: identity.kind) >= 0.93 }) {

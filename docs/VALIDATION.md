@@ -2,6 +2,129 @@
 
 Updated October 13, 2026 on this Apple silicon Mac (8 GB M1).
 
+## Grenade circle, safe clicks and the loadout, October 13
+
+You asked for:
+- a circle of its own for Reverse Impulse throws, at its largest a rectangle close to the screen's edges but safely clear of them;
+- no click ever landing on the inventory or another button;
+- a loadout to work toward: sniper, AR, SMG, a utility item (grenades, Reverse Impulses, a Grappling Hook) or heals, then heals. The assistant may still drop a gun or other item for a potion it needs, drink it, and pick the item up again.
+
+This was checked offline only.
+
+**Clicks:**
+- **Grenade circle.** Throws have their own circle (`CombatSettings.throwRadius`), 60% of the view's height by default. In Settings, **Grenade circle** goes from 20% to "all", which is the whole screen inside the margin.
+- **Edge margin.** Throws stay 6% of the view's height away from every edge.
+- **No-click areas** (`HUDLayout.noClick`): the settings, sound and fullscreen buttons; the map button, minimap and match stats; name, ammunition and vitals; the inventory and its ammo counters; the item panel; the team roster.
+  - They were measured on a 3840×1736 Solo frame and a 2880×1376 Duo frame and padded. Drawn over both frames, every button, the inventory, the minimap and the roster lay inside.
+  - The detector's existing HUD exclusions were too small for clicks: the fullscreen button reaches 2.7 tiles from the left, against an exclusion of 1.7, and the map button sits left of the minimap's exclusion.
+- **No throw is aimed at those areas.** Where the crosshair would rest on one, it steps back toward you along the same line, so the shot keeps its direction. A potion click goes on your character instead.
+- **The preview** draws the margin, the no-click areas and the grenade circle.
+- **Walls.** A throw's reach now also stops at the first thing in the way. With the longer circle, the spot for an opponent behind a wall had fallen on the far side and was given up. It now lands on your side, and the pull brings the opponent through.
+
+**Loadout:**
+- **Guns:** a gun of the loadout's class for its range (sniper, AR, SMG) beats any other there. A Common Uzi replaces a Legendary Pump Shotgun, an AR a pistol, a sniper a DMR. A shotgun still fills an empty close-range slot. Within a class, the ranking decides as before.
+- **Utility:** one item, from the named grenades and the Grappling Hook. The Reverse Impulse ranks first, then the Frag, RGD-5, Sticky Bomb and Grappling Hook, then the rest; the ranking is a judgement.
+  - It takes a free slot that no missing gun needs, replaces a weaker one, and stacks more of the same.
+  - Stacks are counted like potions, and each throw is counted.
+  - The Grappling Hook's prompt ("Grappling Hook / Legendary Unique") is recognized.
+- **What the loadout has no place for goes first** when a slot is needed: a second gun for a range, then a second utility item. A missing gun may also take the slot of the weaker of two heal stacks. The setting **Keep 2 slots for heals and utility when picking up a missing gun** now counts the utility item.
+- **Heal swaps** lend your utility item first, else your weakest gun, and pick it up again after the drink.
+- **Combos:** an SMG now also finishes the pull at your feet, firing as the opponent arrives, because the loadout carries one instead of a shotgun.
+
+**Tests.** 165 Swift tests pass, 7 of them new:
+- the SMG at your feet;
+- a combo spot kept off the HUD;
+- clicks clear of the edges and the HUD, and the crosshair stepping back off the item panel;
+- the loadout's classes;
+- the one utility item: free slot, replacing a weaker one, stacking, the Grappling Hook, unknown grenades never;
+- what makes way first;
+- the utility item lent for a Med Kit and picked up again.
+
+Two earlier combo tests changed with the longer reach. The rev-nade's spot is now on the opponent rather than at the crosshair circle's edge. The guard now permits a throw past the crosshair circle, though not past the grenade circle.
+
+**Replays** (`ZombsPerceive --decide`, before and after, same frames). The recordings never answer the assistant's keys, so a swap it asks for is asked again and again; live, the first one would complete.
+- **Solo `582E17`:**
+  - A Frag on the ground stacked onto the Frags carried ("Pick up Frag Grenade: 3 of 9 held"), and a Snowman Grenade was skipped because the utility slot held the Frag.
+  - An Uncommon M4 was no longer taken as a third mid-range gun. Before, it was compared only with the weaker of the two ARs held, an Uncommon AK; now it is compared with the better one, a Legendary AR.
+- **Solo `C65233`:**
+  - The player carried a Legendary P90 and an Epic Pump Shotgun. An Epic P90 no longer replaced the Pump, which would have left two P90s.
+  - The Pump, the gun the loadout has no place for, made way for a Hybrid Potion, a Small Shield and a Reverse Impulse.
+  - More Frags stacked.
+- **Duo `212F9A`:**
+  - The inventory held an AR-15, a Frag, a Small Shield, an unrecognized item and a Med Kit, with no close-range gun. An Uzi, a UMP or a KSG now takes the Small Shield's slot; before, all of them were skipped as "inventory full". The unrecognized item is never touched.
+  - An Airstrike was skipped because the utility slot held the Frag.
+- **Duo `1EF797`:** more Healing Grenades stacked onto the one held ("2 of 6 held"). A Grappling Hook and an RGD-5 each counted as better utility. With a slot free, each went into it, and the Healing Grenade became the spare that a later gun or heal would replace.
+- No recording has a Reverse Impulse in its inventory, so nothing was thrown.
+
+## Reverse Impulse combos and explosions, October 13
+
+You asked for Reverse Impulse combos and for the assistant to know that explosions hurt you too. The combos pull an opponent into a Frag or RGD-5, into a sniper, XBow, rocket, Gift Launcher or AR shot, or close to your shotgun round corners and doors. This was checked offline only.
+
+**What the game does,** from the ZombsRoyale wiki and a text-recognition pass over all 33 recordings (25,325 frames, 4,011 prompts):
+- A grenade lands where you click and cannot be cooked. A Frag goes off about 2 s after the throw; an RGD-5 or an Impulse about 0.5 s after.
+- The wiki's "rev-nade" is a Frag first, then a Reverse Impulse on the same spot. An RGD-5 goes after the Reverse Impulse instead.
+- A Reverse Impulse pulls every player nearby to where it landed, the thrower and teammates included, even through walls.
+- **Prompts as recorded:**
+  - "Reverse Impulse / Common Grenade". The name has no "Grenade".
+  - "Frag Grenade / Common Grenade", "RGD-5 Grenade", "Sticky Bomb / Epic Grenade".
+  - RPGs say "Rare RPG".
+  - The Crossbow, Gift Launcher, Grenade Launcher, Minigun, Flamethrower, Shuriken, Goo Gun and Grappling Hook all say "<rarity> Unique". The parser did not read that as an item, so a Crossbow or Gift Launcher could never be recognized.
+
+**Changes:**
+- **Grenades by name.** The catalog has 15 throwables, each with what it does (pull, push, blast or other), fuse, radius and throw range. A grenade on the panel or in a slot gets its own ID instead of a generic "throwable". The parser reads "<rarity> Unique" for launchers, bows and throwables. The XBow and Gift Launcher are new named weapons. The RPG, Gift Launcher and Assault SCAR got explosion radii.
+- **Combos** (`Combos.swift`). They need a Reverse Impulse in the inventory, and use the best finisher held:
+  - a Frag, thrown first, then the pull 1.15 s later at the same spot;
+  - an RGD-5, thrown 0.35 s after the pull;
+  - an RPG or Gift Launcher, or one XBow, Crossbow, sniper or DMR shot, fired so it arrives as the opponent lands;
+  - a shotgun, with the pull at your feet, for an opponent round a corner or behind a door;
+  - any other gun, only for an opponent behind cover.
+
+  Combo spots stay inside the crosshair circle, because the game throws to the click. The spot is planned when the grenade is in hand. It is then followed on screen as you move, using the scenery's shift, now passed from the scene tracker, and through the sniper's zoom. Every later step checks again that it is still safe and worth it. Your own slot change, losing the opponent, or 4 s in all ends a combo; the next one waits 3 s.
+- **Explosions hurt you too:**
+  - A blast never lands within its radius plus 0.04 of you, counting your movement until it goes off.
+  - A pull either lands at your feet or out of your reach. It is never thrown when it would drag you into your own Frag; it is checked again if you walk toward the Frag.
+  - Grenades are never thrown through anything solid, where they would bounce back, or where they would catch a teammate.
+  - Exploding rounds (RPG, Gift Launcher, Assault SCAR) are never fired when the target, or anything on the line, is that close to you. In an ordinary fight, another gun is taken instead of the Assault SCAR point-blank.
+  - The input guard checks each throw (`throwAt`) and each shot at the spot (`fireAtPull`) again by itself.
+  - The input driver clicks exactly on the spot and holds the cursor there until the button is up.
+- **Dashboard:** a **Reverse Impulse combos** toggle; a red **GRENADE OUT** label above your character while one of the assistant's grenades is about to go off; the throw spot drawn on the preview.
+
+**Tests.** 158 Swift tests pass, 17 of them new:
+- the rev-nade's order and timing;
+- the RGD-5 after the pull;
+- a sniper shot timed through the zoom change;
+- any gun only for an opponent behind cover;
+- the shotgun pull through a door;
+- no blast near you;
+- no pull into your own Frag after you walk toward it;
+- giving up on an opponent who runs off;
+- nothing thrown into a tree;
+- exploding rounds near you;
+- the input guard refusing unsafe or pointless throws: at a gun in hand, beyond the circle, at nobody, at a teammate, unknown grenades, an Impulse, through a wall;
+- recorded prompt texts;
+- the cooldown, and your own slot change ending a combo;
+- a spot followed on screen, through every frame of a slot switch;
+- the icon library never taking one grenade for another.
+
+The synthetic replay fixtures still give 4 proposed actions, 1 fire and 2 pickup presses, with 0 guard rejections.
+
+**Replays** (`ZombsPerceive --decide`, seeded icon library), on the four recordings that carry grenades:
+- Frags are now named in the inventory: Solo `582E17` (200 slot-frames), Solo `C65233` (133) and Duo `212F9A` (788).
+- Duo `1EF797`: its Healing Grenade (797) and Epic RPG (559) are named. So is the Rare RPG in `582E17`.
+- No recording has a Reverse Impulse in the inventory, so no combo started and nothing was thrown. What these replays check is that grenades are now named, and that a Healing Grenade, an Impulse or an unknown grenade is never thrown.
+
+**Unverified live:**
+- **Estimates:**
+  - the Reverse Impulse's 0.5 s fuse (assumed equal to the Impulse's);
+  - how long a pull takes (0.3 s);
+  - the radii: Frag 0.08, RGD-5 0.065, pull 0.09, RPG 0.07, Gift Launcher 0.04, Assault SCAR 0.035 view widths;
+  - rocket and arrow speeds;
+  - that a grenade lands exactly where you click within the circle.
+- Whether the game throws on the button going down or up. The click is held 60 ms with the cursor kept still, which works either way.
+- Whether the Reverse Impulse moves you when it lands at your feet.
+- Duo and Squad: a pulled opponent may need a new name-tag read before a gun follows up there. Grenade combos do not need one.
+- The Reverse Impulse's icon is not in the icon library yet. Picking one up while its prompt is read teaches it, and until then a Reverse Impulse in a slot is not used.
+
 ## Potions first when low, and stack sizes, October 13
 
 You asked for potions to come first when you are low on health. You also gave the stack sizes: big shields stack to 2, small shields and hybrids to 4, which is two ground pickups. This was checked offline only.

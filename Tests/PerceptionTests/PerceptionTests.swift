@@ -354,4 +354,17 @@ struct PerceptionTests {
         let clear = IconLibrary(entries: [IconEntry(identity: m4, fingerprint: icon(1), samples: 1), IconEntry(identity: ak, fingerprint: icon(2), samples: 1)])
         #expect(clear.match(icon(1))?.identity.name == "M4")
     }
+    @Test func testIconLibraryNeverTakesOneGrenadeForAnother() {
+        let rev = ItemIdentity(kind: .throwable, name: "Reverse Impulse"), frag = ItemIdentity(kind: .throwable, name: "Frag Grenade")
+        #expect(rev.itemID(rarity: nil) == "reverse_impulse_grenade" && frag.itemID(rarity: nil) == "frag_grenade")
+        // Two grenades whose icons match equally well: a throwable, but not which one, so it is never thrown.
+        let tied = IconLibrary(entries: [IconEntry(identity: rev, fingerprint: icon(1), samples: 1), IconEntry(identity: frag, fingerprint: icon(1), samples: 1)])
+        let match = tied.match(icon(1))
+        #expect(match?.identity.kind == .throwable && match?.identity.name == "")
+        #expect(match?.identity.itemID(rarity: nil) == ItemCatalog.throwableID)
+        // Nor is one grenade's icon learned under another grenade's name.
+        let library = IconLibrary(entries: [IconEntry(identity: frag, fingerprint: icon(1), samples: 1)])
+        #expect(!library.learn(rev, icon(1)))
+        #expect(library.match(icon(1))?.identity.name == "Frag Grenade")
+    }
 }

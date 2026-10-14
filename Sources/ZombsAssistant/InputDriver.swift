@@ -14,6 +14,8 @@ final class InputDriver {
     /// When each tapped key may go up. The next frame's decision comes about 18 ms after a tap and used to release it
     /// then, so a game sampling keys once per frame below 60 fps could miss the press.
     private var tapEnds:[UInt16:Double]=[:]
+    /// When a throw's click may go up. The game throws to where the cursor is, so it stays put until then.
+    private var clickEnds:Double?
     static let tapDuration=0.06
     private let releaseQueue=DispatchQueue(label:"input.key-release",qos:.userInteractive)
     private var enabled = false
@@ -50,13 +52,30 @@ final class InputDriver {
             case .aim(let point):
                 // `aim` stays the point aimed at, which the guard checks; the mouse only goes as far as the aim circle.
                 aim = point
-                move(to: Targeting.cursor(toward: point, from: o.player, aspect: o.aspect, radius: settings.aimRadius).point, bounds, content)
-            case .fire, .useConsumable:
+                if clickEnds == nil { move(to: Targeting.cursor(toward: point, from: o.player, aspect: o.aspect, radius: settings.aimRadius, avoiding: o.hudAreas).point, bounds, content) }
+            case .throwAt(let point):
+                // The game throws to where you click; the guard has checked that the point is inside the grenade circle,
+                // away from the edges and off the HUD. The decision lets go first; a click still going up is never doubled.
+                guard !mouseHeld else { break }
+                move(to: point, bounds, content)
+                post(CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: screen(point, bounds, content), mouseButton: .left))
+                mouseHeld = true
+                let end = ProcessInfo.processInfo.systemUptime + Self.tapDuration
+                clickEnds = end
+                releaseQueue.asyncAfter(deadline:.now()+Self.tapDuration) { [weak self] in
+                    guard let self else { return }
+                    self.lock.lock(); defer { self.lock.unlock() }
+                    // Only this click: everything may have been let go, and another click made, meanwhile.
+                    guard self.clickEnds == end else { return }
+                    self.clickEnds = nil
+                    if self.mouseHeld { self.post(CGEvent(mouseEventSource: self.source, mouseType: .leftMouseUp, mouseCursorPosition: CGEvent(source:nil)?.location ?? .zero, mouseButton: .left)); self.mouseHeld = false }
+                }
+            case .fire, .fireAtPull, .useConsumable:
                 guard !mouseHeld else { break }
                 // Press only inside the aim circle, never where the cursor was left: a press on the window's edge resizes
                 // or drags the window. A shot goes along the aim; a consumable does not care where you click.
                 let press: Point
-                if case .fire = intent, let aim { press = Targeting.cursor(toward: aim, from: o.player, aspect: o.aspect, radius: settings.aimRadius).point }
+                if intent != .useConsumable, let aim { press = Targeting.cursor(toward: aim, from: o.player, aspect: o.aspect, radius: settings.aimRadius, avoiding: o.hudAreas).point }
                 else if let here = CGEvent(source: nil).map({ viewport($0.location, bounds, content) }), insideCircle(here, o) { press = here }
                 else { press = o.player }
                 move(to: press, bounds, content)
@@ -81,8 +100,12 @@ final class InputDriver {
     /// Lets go of what a decision no longer asks for. A tap still inside `tapDuration` goes up on its own schedule.
     private func releaseHeld(keepingTaps: Bool = true) {
         lock.lock(); defer { lock.unlock() }
-        if mouseHeld { post(CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: CGEvent(source:nil)?.location ?? .zero, mouseButton:.left)); mouseHeld = false }
         let now = ProcessInfo.processInfo.systemUptime
+        // A throw's click still inside `tapDuration` goes up on its own schedule, like a tap.
+        if mouseHeld && !(keepingTaps && now < clickEnds ?? 0) {
+            post(CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: CGEvent(source:nil)?.location ?? .zero, mouseButton:.left))
+            mouseHeld = false; clickEnds = nil
+        }
         for key in pressedKeys.filter({ !keepingTaps || now >= tapEnds[$0] ?? 0 }) {
             post(CGEvent(keyboardEventSource:source,virtualKey:key,keyDown:false)); pressedKeys.remove(key); tapEnds[key] = nil
         }
@@ -100,9 +123,9 @@ final class InputDriver {
     private func move(to p: Point, _ bounds: CGRect, _ content: CGRect) {
         post(CGEvent(mouseEventSource: source, mouseType: mouseHeld ? .leftMouseDragged : .mouseMoved, mouseCursorPosition: screen(p, bounds, content), mouseButton: .left))
     }
-    /// Whether a viewport point is where `Targeting.cursor` could have put it: within the aim circle around you.
+    /// Whether a viewport point is where `Targeting.cursor` could have put it: within the aim circle around you, off the HUD.
     private func insideCircle(_ p: Point, _ o: Observation) -> Bool {
-        p.isInViewport && Targeting.cursor(toward: p, from: o.player, aspect: o.aspect, radius: settings.aimRadius).point.distance(to: p, aspect: o.aspect) < 1e-6
+        p.isInViewport && Targeting.cursor(toward: p, from: o.player, aspect: o.aspect, radius: settings.aimRadius, avoiding: o.hudAreas).point.distance(to: p, aspect: o.aspect) < 1e-6
     }
     private func releaseInteract() {
         lock.lock(); defer { lock.unlock() }

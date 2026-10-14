@@ -5,6 +5,18 @@ public enum MatchPhase: String, Codable, Sendable { case unknown, menu, alive, d
 public enum Affiliation: String, Codable, Sendable { case enemy, teammate, unknown }
 public enum ItemKind: String, Codable, Sendable { case weapon, healing, melee, throwable }
 public enum WeaponRole: String, Codable, CaseIterable, Sendable { case close, medium, long }
+/// What a throwable does where it lands.
+public enum ThrowableEffect: String, Codable, CaseIterable, Sendable {
+    /// Pulls every player near it to where it landed, you and your teammates included, even through walls; no damage
+    /// (Reverse Impulse).
+    case pull
+    /// Pushes players away; no damage (Impulse).
+    case push
+    /// Explodes where it landed, hurting everyone near it, you included, though not your teammates (Frag, RGD-5).
+    case blast
+    /// Anything else: smoke, freezing, snowmen, healing, gas or fire, bombs that stick or burst into thorns.
+    case other
+}
 
 public struct ItemProfile: Codable, Equatable, Sendable {
     public var id: String
@@ -49,6 +61,21 @@ public struct ItemProfile: Codable, Equatable, Sendable {
     /// How many of those points the gun is worth over an average gun of its class at the same rarity; the weapon
     /// chosen for a distance band adds it to the class's preference there.
     public var edge: Double = 0
+    /// Throwables: what one does where it lands; nil for items that are never thrown on purpose.
+    public var effect: ThrowableEffect?
+    /// Throwables: seconds from the throw until it goes off. Weapons: seconds until a round goes off for rounds that
+    /// bounce around first (the Grenade Launcher's); such a weapon is never fired automatically.
+    public var fuse: Double = 0
+    /// In the default view's widths. A throwable's blast or pull reaches this far from where it lands. A weapon's round
+    /// that explodes (the RPG's, the Gift Launcher's, every sixth of the Assault SCAR's) hurts everyone this close to
+    /// where it hits, you included. 0: no explosion.
+    public var radius: Double = 0
+    /// Damage at the center of a throwable's blast.
+    public var damage: Double = 0
+    /// Throwables: the farthest from you one lands. The game throws it to where you click.
+    public var throwRange: Double = 0
+    /// Pull throwables: seconds the pull takes to bring a player to its center.
+    public var pullDuration: Double = 0
     public init(id: String, name: String, kind: ItemKind, role: WeaponRole? = nil) {
         self.id = id; self.name = name; self.kind = kind; self.role = role
     }
@@ -82,9 +109,16 @@ public struct ItemProfile: Codable, Equatable, Sendable {
         zoom = try c.decodeIfPresent(Double.self, forKey: .zoom) ?? 1
         power = try c.decodeIfPresent(Double.self, forKey: .power)
         edge = try c.decodeIfPresent(Double.self, forKey: .edge) ?? 0
+        effect = try c.decodeIfPresent(ThrowableEffect.self, forKey: .effect)
+        fuse = try c.decodeIfPresent(Double.self, forKey: .fuse) ?? 0
+        radius = try c.decodeIfPresent(Double.self, forKey: .radius) ?? 0
+        damage = try c.decodeIfPresent(Double.self, forKey: .damage) ?? 0
+        throwRange = try c.decodeIfPresent(Double.self, forKey: .throwRange) ?? 0
+        pullDuration = try c.decodeIfPresent(Double.self, forKey: .pullDuration) ?? 0
     }
     public var isValid: Bool {
-        !id.isEmpty && [shotInterval,reloadDuration,switchDelay,projectileSpeed,minRange,maxRange,healthGain,shieldGain,healthCap,shieldCap,useDuration,keepValue,overTime].allSatisfy { $0.isFinite && $0 >= 0 }
+        !id.isEmpty && [shotInterval,reloadDuration,switchDelay,projectileSpeed,minRange,maxRange,healthGain,shieldGain,healthCap,shieldCap,useDuration,keepValue,overTime,
+                        fuse,radius,damage,throwRange,pullDuration].allSatisfy { $0.isFinite && $0 >= 0 }
         && shotInterval >= 0.03 && switchDelay >= 0.05 && maxRange >= minRange && healthCap <= 100 && shieldCap <= 100
         && (minHitProbability.map { $0.isFinite && $0 > 0 && $0 <= 1 } ?? true) && zoom.isFinite && (0.5...3).contains(zoom)
         && (power?.isFinite ?? true) && edge.isFinite
@@ -205,7 +239,11 @@ public struct InteractionPrompt: Codable, Equatable, Sendable {
         self.name = name; self.subtitle = subtitle; self.kind = kind; self.itemID = itemID; self.weaponClass = weaponClass
         self.rarity = rarity; self.count = count; self.confidence = confidence; self.stable = stable
     }
-    public var isItem: Bool { (kind == .weapon || kind == .healing) && itemID != nil }
+    /// A gun, consumable or named throwable the assistant can decide on; a throwable it cannot name never is.
+    public var isItem: Bool {
+        guard let itemID else { return false }
+        return kind == .weapon || kind == .healing || kind == .throwable && itemID != ItemCatalog.throwableID
+    }
 }
 
 public struct Observation: Codable, Equatable, Sendable {
@@ -228,6 +266,14 @@ public struct Observation: Codable, Equatable, Sendable {
     public var inventory: [InventorySlot] = []
     public var players: [PlayerTrack] = []
     public var obstacles: [Obstacle] = []
+    /// How far static scenery moved on screen since the previous frame, opposite to your own movement; nil when no
+    /// scenery was matched. A spot on the ground moves by the same amount.
+    public var sceneryShift: Point?
+    /// Your own movement on screen, in viewport fractions per second, from the scenery's motion; nil until measured.
+    public var ownVelocity: Point?
+    /// HUD areas a click must never land on: buttons, the inventory, the minimap, vitals, the prompt panel (see
+    /// `Policy.clickable`).
+    public var hudAreas: [Rect] = []
     public var prompt: InteractionPrompt?
     /// The consumable the prompt panel says is in your hand ("Left Click to Consume"), when it shows that hint.
     public var heldConsumable: String?
@@ -259,6 +305,9 @@ public struct Observation: Codable, Equatable, Sendable {
         inventory = try c.decodeIfPresent([InventorySlot].self, forKey: .inventory) ?? []
         players = try c.decodeIfPresent([PlayerTrack].self, forKey: .players) ?? []
         obstacles = try c.decodeIfPresent([Obstacle].self, forKey: .obstacles) ?? []
+        sceneryShift = try c.decodeIfPresent(Point.self, forKey: .sceneryShift)
+        ownVelocity = try c.decodeIfPresent(Point.self, forKey: .ownVelocity)
+        hudAreas = try c.decodeIfPresent([Rect].self, forKey: .hudAreas) ?? []
         prompt = try c.decodeIfPresent(InteractionPrompt.self, forKey: .prompt)
         heldConsumable = try c.decodeIfPresent(String.self, forKey: .heldConsumable)
         promptVisible = try c.decodeIfPresent(Bool.self, forKey: .promptVisible) ?? (prompt != nil)
@@ -277,6 +326,8 @@ public struct Features: Codable, Equatable, Sendable {
     public var chests = true
     /// Carry the long-range gun while nothing is happening.
     public var idleWeapon = true
+    /// Reverse Impulse combos: pull an opponent to where a grenade, a shot or your shotgun is waiting (see `Combos`).
+    public var combos = true
     public init() {}
 }
 
@@ -293,6 +344,11 @@ public enum InputIntent: Codable, Equatable, Sendable {
     case open(String)
     /// Hold interact at a chest that takes several seconds to open (an air drop); any decision without it lets go.
     case holdOpen(String)
+    /// Click once with the throwable in hand at this point, where the game throws it.
+    case throwAt(Point)
+    /// Fire along the aim at the spot a pull grenade is bringing an opponent to (see `Combos`). Unlike `fire`, the
+    /// opponent may still be on the way there.
+    case fireAtPull
     case releaseAll
 }
 

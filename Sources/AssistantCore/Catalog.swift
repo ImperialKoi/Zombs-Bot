@@ -65,6 +65,13 @@ public struct WeaponModel: Codable, Equatable, Sendable {
     public var reloadDuration: Double?
     public var ammo: AmmoFamily?
     public var minHitProbability: Double?
+    /// See `ItemProfile`: an exploding round's radius, a bouncing round's delay, and overrides of the class's bullet
+    /// speed, zoom and range for launchers and bows, whose rounds and views differ from the rest of their class.
+    public var radius: Double?
+    public var fuse: Double?
+    public var projectileSpeed: Double?
+    public var zoom: Double?
+    public var maxRange: Double?
 
     public static let rarityStep = 3.0
     public func power(_ rarity: Rarity) -> Double { Double(101 - rank) + Self.rarityStep * Double(rarity.rawValue - best.rawValue) }
@@ -91,18 +98,42 @@ public struct HealSpec: Codable, Equatable, Sendable {
     public var groundStack: Int?
 }
 
+/// A grenade or other throwable, as its prompt names it ("Frag Grenade"), or another utility item (the Grappling Hook).
+/// The game throws it to where you click, and it goes off `fuse` seconds after the throw (it cannot be cooked). Distances
+/// are in the default view's widths; see `ItemProfile` for each field.
+public struct ThrowableSpec: Codable, Equatable, Sendable {
+    public var id: String
+    public var name: String
+    /// Other spellings, matched like gun names.
+    public var aliases: [String]?
+    public var effect: ThrowableEffect
+    public var fuse: Double
+    public var radius: Double
+    public var damage: Double
+    public var throwRange: Double
+    /// Seconds between two throws.
+    public var throwInterval: Double
+    public var pullDuration: Double?
+    public var maxStack: Int?
+    public var groundStack: Int?
+    /// Worth in the loadout's one utility slot (`ItemProfile.power`): the Reverse Impulse, which starts combos, most.
+    public var power: Double?
+}
+
 /// Items the assistant can recognize. Weapon IDs are `<class>:<rarity>:<model>` for a gun whose name is in `models`,
 /// e.g. `ar:rare:m4`, and `<class>:<rarity>` for any other gun of that class.
 public struct ItemCatalog: Codable, Equatable, Sendable {
     public var weapons: [WeaponSpec]
     public var models: [WeaponModel]
     public var heals: [HealSpec]
+    public var throwables: [ThrowableSpec]
     /// Class phrase of the second prompt line, lowercased ("ar", "assault rifle").
     public var classWords: [String: WeaponClass]
     public var healingWords: [String]
     public var throwableWords: [String]
 
     public static let fistsID = "fists"
+    /// A throwable whose name is not known: never thrown.
     public static let throwableID = "throwable"
 
     public static func weaponID(_ weaponClass: WeaponClass, _ rarity: Rarity, model: String? = nil) -> String {
@@ -176,6 +207,20 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
         guard !key.isEmpty else { return nil }
         return heals.first { heal in ([heal.name] + heal.aliases).contains { Self.letters($0) == key } }
     }
+    public func throwable(id: String) -> ThrowableSpec? { throwables.first { $0.id == id } }
+    /// The throwable a prompt or icon names. Like gun names, look-alike characters match, and a name of eight or more
+    /// letters may have one other letter wrong, each only when no other throwable matches as well. A Reverse Impulse is
+    /// never taken for an Impulse: their names differ by a whole word.
+    public func throwable(named name: String) -> ThrowableSpec? {
+        func keys(_ t: ThrowableSpec) -> [String] { ([t.name] + (t.aliases ?? [])).map(Self.nameKey) }
+        func unique(_ found: [ThrowableSpec]) -> ThrowableSpec? { Set(found.map(\.id)).count == 1 ? found[0] : nil }
+        let key = Self.nameKey(name), shape = Self.shapeKey(name)
+        guard !key.isEmpty else { return nil }
+        if let t = unique(throwables.filter { keys($0).contains(key) }) { return t }
+        if let t = unique(throwables.filter { keys($0).map(Self.shapeKey).contains(shape) }) { return t }
+        guard shape.count >= 8 else { return nil }
+        return unique(throwables.filter { keys($0).contains { HUDText.editDistance(Self.shapeKey($0), shape) <= 1 } })
+    }
     static func letters(_ text: String) -> String { String(text.folding(options: .diacriticInsensitive, locale: nil).lowercased().filter { $0.isLetter }) }
 
     public func profile(_ id: String) -> ItemProfile? {
@@ -191,10 +236,12 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
             p.tier = rarity.rawValue; p.verified = true; p.estimated = true
             p.automatic = named?.automatic ?? spec.automatic; p.shotInterval = named?.shotInterval ?? spec.shotInterval
             p.reloadDuration = named?.reloadDuration ?? spec.reloadDuration
-            p.switchDelay = spec.switchDelay; p.projectileSpeed = spec.projectileSpeed; p.maxRange = spec.maxRange
+            p.switchDelay = spec.switchDelay; p.projectileSpeed = named?.projectileSpeed ?? spec.projectileSpeed
+            p.maxRange = named?.maxRange ?? spec.maxRange
             p.weaponClass = weaponClass; p.rarity = rarity; p.ammo = named?.ammo ?? spec.ammo
             p.minHitProbability = named?.minHitProbability ?? spec.minHitProbability
-            p.zoom = spec.zoom ?? 1
+            p.zoom = named?.zoom ?? spec.zoom ?? 1
+            p.radius = named?.radius ?? 0; p.fuse = named?.fuse ?? 0
             // A gun whose name is not recognized counts as an average one of its class.
             let average = spec.power.map { $0 + WeaponModel.rarityStep * Double(rarity.rawValue - Rarity.legendary.rawValue) }
             p.power = named.map { $0.power(rarity) } ?? average
@@ -211,6 +258,14 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
             p.maxStack = heal.maxStack; p.groundStack = heal.groundStack
             return p
         }
+        if let spec = throwable(id: id) {
+            var p = ItemProfile(id: id, name: spec.name, kind: .throwable)
+            p.verified = true; p.estimated = true
+            p.effect = spec.effect; p.fuse = spec.fuse; p.radius = spec.radius; p.damage = spec.damage
+            p.throwRange = spec.throwRange; p.shotInterval = spec.throwInterval; p.pullDuration = spec.pullDuration ?? 0
+            p.maxStack = spec.maxStack; p.groundStack = spec.groundStack; p.power = spec.power
+            return p
+        }
         return nil
     }
 
@@ -219,7 +274,7 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
         var ids = [Self.fistsID, Self.throwableID]
         for spec in weapons { for rarity in Rarity.allCases { ids.append(Self.weaponID(spec.weaponClass, rarity)) } }
         for model in models { for rarity in Rarity.allCases { ids.append(Self.weaponID(model.weaponClass, rarity, model: model.id)) } }
-        ids += heals.map(\.id)
+        ids += heals.map(\.id) + throwables.map(\.id)
         return ids.compactMap(profile)
     }
 
@@ -255,7 +310,9 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
         // automatic. Range, bullet speed and zoom stay the class estimates: the wiki only describes them in words.
         models: [
             WeaponModel(id: "scoped_m4", name: "Scoped M4", weaponClass: .ar, rank: 1, best: .mythic, automatic: true, shotInterval: 0.1, reloadDuration: 1.5, ammo: .medium),
-            WeaponModel(id: "assault_scar", name: "Assault SCAR", weaponClass: .ar, rank: 2, best: .mythic, automatic: true, shotInterval: 0.083, reloadDuration: 1.5, ammo: .medium),
+            // Every sixth round explodes, hurting you too when what it hits is close (radius estimated).
+            WeaponModel(id: "assault_scar", name: "Assault SCAR", weaponClass: .ar, rank: 2, best: .mythic, automatic: true, shotInterval: 0.083, reloadDuration: 1.5, ammo: .medium,
+                        radius: 0.035),
             WeaponModel(id: "mg36", name: "MG36", weaponClass: .ar, rank: 3, best: .mythic, automatic: true, shotInterval: 0.1, reloadDuration: 1.4, ammo: .medium),
             WeaponModel(id: "m4", name: "M4", weaponClass: .ar, rank: 6, best: .legendary, automatic: true, shotInterval: 0.1, reloadDuration: 1.4, ammo: .medium),
             WeaponModel(id: "xm8", name: "XM8", aliases: ["XM-8"], weaponClass: .ar, rank: 8, best: .mythic, automatic: true, shotInterval: 0.083, reloadDuration: 1.5, ammo: .medium),
@@ -292,10 +349,20 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
             WeaponModel(id: "glock", name: "Glock", weaponClass: .pistol, rank: 38, best: .uncommon, automatic: true, shotInterval: 0.083, reloadDuration: 1, ammo: .small, minHitProbability: 0.01),
             WeaponModel(id: "p2000", name: "P2000", aliases: ["P2K"], weaponClass: .pistol, rank: 39, best: .uncommon, automatic: true, shotInterval: 0.09, reloadDuration: 1, ammo: .small, minHitProbability: 0.01),
             WeaponModel(id: "minigun", name: "Minigun", weaponClass: .minigun, rank: 28, best: .legendary, automatic: true, shotInterval: 0.045, reloadDuration: 3, ammo: .small),
-            // Launchers and bows stay manual; named here for the dashboard.
-            WeaponModel(id: "rpg", name: "RPG", weaponClass: .launcher, rank: 30, best: .legendary, ammo: .large),
-            WeaponModel(id: "grenade_launcher", name: "Grenade Launcher", weaponClass: .launcher, rank: 37, best: .legendary, ammo: .large),
-            WeaponModel(id: "crossbow", name: "Crossbow", weaponClass: .special, rank: 34, best: .mythic, ammo: .large),
+            // Launchers and bows are never picked up or used in an ordinary fight; one you carry finishes a Reverse Impulse
+            // combo (see `Combos`). A rocket or present explodes on the first thing it hits, hurting you too when that is
+            // close. The Grenade Launcher's grenades bounce around before they go off, so it is never fired. Rocket and
+            // arrow speeds, explosion radii and the bows' zoom (the wiki: an AWP's view) are estimates.
+            WeaponModel(id: "rpg", name: "RPG", aliases: ["Rocket Launcher"], weaponClass: .launcher, rank: 30, best: .legendary, shotInterval: 1, reloadDuration: 1, ammo: .large,
+                        radius: 0.07, projectileSpeed: 0.5),
+            WeaponModel(id: "grenade_launcher", name: "Grenade Launcher", weaponClass: .launcher, rank: 37, best: .legendary, shotInterval: 0.5, reloadDuration: 0.7, ammo: .large,
+                        radius: 0.06, fuse: 1, projectileSpeed: 0.7),
+            WeaponModel(id: "gift_launcher", name: "Gift Launcher", weaponClass: .launcher, rank: 40, best: .legendary, automatic: true, shotInterval: 0.25, reloadDuration: 1, ammo: .large,
+                        radius: 0.04, projectileSpeed: 0.8),
+            WeaponModel(id: "xbow", name: "XBow", aliases: ["X-Bow"], weaponClass: .special, rank: 22, best: .mythic, shotInterval: 1.6, reloadDuration: 1.6, ammo: .large,
+                        projectileSpeed: 0.75, zoom: 1.2, maxRange: 0.8),
+            WeaponModel(id: "crossbow", name: "Crossbow", weaponClass: .special, rank: 34, best: .mythic, shotInterval: 1.6, reloadDuration: 1.6, ammo: .large,
+                        projectileSpeed: 0.75, zoom: 1.2, maxRange: 0.8),
         ],
         heals: [
             // Keep values: small shields only work below 50 shield and bandages below 75 health, so they are cheap to spend;
@@ -315,6 +382,41 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
             HealSpec(id: "hybrid_potion", name: "Hybrid Potion", aliases: [], healthGain: 25, shieldGain: 25, healthCap: 100, shieldCap: 100, useDuration: 2, keepValue: 12,
                      overTime: 10, hints: ["Heals and shields 25% over time"], maxStack: 4, groundStack: 2),
         ],
+        // Fuses and damage from the ZombsRoyale wiki (October 2026): a Frag goes off about 2 s after the throw, an RGD-5 and
+        // an Impulse about 0.5 s; the Reverse Impulse is taken to be as quick as the Impulse, as the wiki's combos imply
+        // (Frag first, then the Reverse Impulse; Reverse Impulse first, then the RGD-5). Stacks from docs/WEAPONS.md. Blast and
+        // pull radii, throw ranges, intervals and how long a pull takes are estimates to check in play. Only pulls and blasts
+        // that land where you click are ever thrown: a Sticky Bomb flies until it hits something, a Cactus Bomb bursts into
+        // bouncing thorns, and the rest do not combine.
+        throwables: [
+            ThrowableSpec(id: "frag_grenade", name: "Frag Grenade", aliases: ["Frag"], effect: .blast, fuse: 2, radius: 0.08, damage: 83,
+                          throwRange: 0.4, throwInterval: 1, maxStack: 9, groundStack: 3, power: 8),
+            ThrowableSpec(id: "rgd5_grenade", name: "RGD-5 Grenade", aliases: ["RGD-5", "RGD5 Grenade"], effect: .blast, fuse: 0.5, radius: 0.065, damage: 40,
+                          throwRange: 0.45, throwInterval: 0.5, maxStack: 10, groundStack: 5, power: 7),
+            // The prompt says "Reverse Impulse / Common Grenade".
+            ThrowableSpec(id: "reverse_impulse_grenade", name: "Reverse Impulse", aliases: ["Reverse Impulse Grenade"], effect: .pull, fuse: 0.5, radius: 0.09,
+                          damage: 0, throwRange: 0.4, throwInterval: 1, pullDuration: 0.3, maxStack: 9, groundStack: 3, power: 10),
+            ThrowableSpec(id: "impulse_grenade", name: "Impulse Grenade", effect: .push, fuse: 0.5, radius: 0.09, damage: 0,
+                          throwRange: 0.4, throwInterval: 1, maxStack: 9, groundStack: 3, power: 5),
+            ThrowableSpec(id: "sticky_bomb", name: "Sticky Bomb", effect: .other, fuse: 2, radius: 0.07, damage: 50, throwRange: 0, throwInterval: 1, maxStack: 9, groundStack: 3, power: 6),
+            ThrowableSpec(id: "cactus_bomb", name: "Cactus Bomb", effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0, throwInterval: 1, maxStack: 9, groundStack: 3, power: 5),
+            ThrowableSpec(id: "gassy_grenade", name: "Gassy Grenade", effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0, throwInterval: 1, maxStack: 9, groundStack: 3, power: 4),
+            ThrowableSpec(id: "incendiary_grenade", name: "Incendiary Grenade", aliases: ["Fire Grenade"], effect: .other, fuse: 0, radius: 0, damage: 0,
+                          throwRange: 0, throwInterval: 1, maxStack: 9, groundStack: 3, power: 4),
+            ThrowableSpec(id: "smoke_grenade", name: "Smoke Grenade", effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0, throwInterval: 1, maxStack: 9, groundStack: 3, power: 3),
+            ThrowableSpec(id: "freeze_grenade", name: "Freeze Grenade", effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0, throwInterval: 1, maxStack: 3, groundStack: 3, power: 4),
+            ThrowableSpec(id: "snowman_grenade", name: "Snowman Grenade", effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0, throwInterval: 1, maxStack: 6, groundStack: 3, power: 3),
+            ThrowableSpec(id: "healing_grenade", name: "Healing Grenade", effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0, throwInterval: 1, maxStack: 6, groundStack: 2, power: 4),
+            ThrowableSpec(id: "shuriken", name: "Shuriken", effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0, throwInterval: 0.5, maxStack: 90, groundStack: 30, power: 2),
+            ThrowableSpec(id: "snowball", name: "Snowball", effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0, throwInterval: 0.5, maxStack: 30, groundStack: 6, power: 1),
+            // Fired, not thrown, and never used by the assistant; it rides in the utility slot ("Grappling Hook / Legendary
+            // Unique", with its uses as the badge).
+            ThrowableSpec(id: "grappling_hook", name: "Grappling Hook", aliases: ["Grapple Hook"], effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0,
+                          throwInterval: 1, maxStack: 1, groundStack: 1, power: 6),
+            // A flare that calls in explosions, "Airstrike / Legendary Grenade" on the prompt.
+            ThrowableSpec(id: "airstrike", name: "Airstrike", aliases: ["Airstrike Gun"], effect: .other, fuse: 0, radius: 0, damage: 0, throwRange: 0, throwInterval: 1,
+                          maxStack: nil, groundStack: 5, power: 5),
+        ],
         classWords: [
             "ar": .ar, "assault rifle": .ar, "rifle": .ar, "burst rifle": .ar,
             "smg": .smg, "submachine gun": .smg,
@@ -332,12 +434,13 @@ public struct ItemCatalog: Codable, Equatable, Sendable {
 }
 
 extension ItemCatalog {
-    /// A tuned catalog saved before named guns existed gets the built-in list.
+    /// A tuned catalog saved before named guns or throwables existed gets the built-in lists.
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         weapons = try c.decode([WeaponSpec].self, forKey: .weapons)
         models = try c.decodeIfPresent([WeaponModel].self, forKey: .models) ?? ItemCatalog.standard.models
         heals = try c.decode([HealSpec].self, forKey: .heals)
+        throwables = try c.decodeIfPresent([ThrowableSpec].self, forKey: .throwables) ?? ItemCatalog.standard.throwables
         classWords = try c.decode([String: WeaponClass].self, forKey: .classWords)
         healingWords = try c.decode([String].self, forKey: .healingWords)
         throwableWords = try c.decode([String].self, forKey: .throwableWords)

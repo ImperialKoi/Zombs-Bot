@@ -99,6 +99,7 @@ public final class PerceptionEngine {
         }
         if alive {
             o.phase = .alive; o.phaseConfidence = 1; o.playerConfidence = 1
+            o.hudAreas = layout.noClick(rosterRows: hud.rosterRows).map(layout.normalized)
             o.health = hud.health; o.shield = hud.shield; o.hudConfidence = hud.vitalsConfidence
             o.selectedSlot = hud.selectedSlot; o.selectedSlotConfidence = hud.selectedConfidence
         } else {
@@ -186,6 +187,7 @@ public final class PerceptionEngine {
                 let raw = try detector.predict(ciImage).filter { d in !exclusions.contains { $0.contains(d.bounds.center) } }
                 result.detectorInput = detector.lastInput
                 detections = tracker.update(Self.mergingDuplicatePlayers(Self.excludingYourself(raw, aspect: o.aspect)), at: t, aspect: o.aspect)
+                o.sceneryShift = tracker.shift; o.ownVelocity = tracker.ownVelocity
             } catch {
                 o.captureHealthy = false; result.problems.append(error.localizedDescription)
             }

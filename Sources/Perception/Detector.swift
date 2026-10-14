@@ -251,8 +251,12 @@ public final class SceneTracker {
     private var time=0.0
     private var nextID=1
     private var motion=PlayerMotionTracker()
+    /// How far static scenery moved on screen in the latest update; nil when none was matched.
+    public private(set) var shift:Point?
+    /// Your own movement on screen, per second, from the scenery's motion.
+    public var ownVelocity:Point? { motion.ownVelocity }
     public init() {}
-    public func reset() { previous=[]; time=0; motion.reset() }
+    public func reset() { previous=[]; time=0; motion.reset(); shift=nil }
     public func update(_ input:[Detection], at timestamp:Double, aspect:Double)->[Detection] {
         let dt=timestamp-time
         let fresh=dt > 0 && dt < 0.3
@@ -264,6 +268,7 @@ public final class SceneTracker {
         }
         func median(_ values:[Double])->Double { values.isEmpty ? 0 : values.sorted()[values.count/2] }
         let camera=Point(median(shifts.map(\.x)),median(shifts.map(\.y)))
+        shift=shifts.isEmpty ? nil : camera
         // Players get ground-motion filters, which keep their identity through brief misses.
         let playerIndices=input.indices.filter { input[$0].label=="player" }
         let tracks=motion.update(time:timestamp,aspect:aspect,sceneryShift:shifts.isEmpty ? nil : camera,

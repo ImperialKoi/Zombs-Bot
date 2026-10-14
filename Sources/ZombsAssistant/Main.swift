@@ -44,6 +44,7 @@ struct Dashboard:View {
                         Toggle("Pick up guns & heals",isOn:$model.features.loot)
                         Toggle("Open chests & crates",isOn:$model.features.chests)
                         Toggle("Carry the sniper when it's quiet",isOn:$model.features.idleWeapon)
+                        Toggle("Reverse Impulse combos",isOn:$model.features.combos)
                         Toggle("Heal during safe gaps",isOn:$model.features.healing)
                         Button(model.armed ? "Turn off supervised input" : "Enable supervised input",systemImage:model.armed ? "power" : "play.fill") {
                             if model.armed { model.pause() } else { model.arm() }
@@ -225,10 +226,22 @@ struct DiagnosticCanvas:View {
                             if let panel=hud.promptRect { context.stroke(Path(pixels(panel)),with:.color(.mint),lineWidth:1.5) }
                             context.stroke(Path(pixels(l.readout)),with:.color(.cyan.opacity(0.5)),lineWidth:1)
                         }
-                        for intent in report.decision.intents { if case .aim(let p)=intent {
-                            let c=CGPoint(x:p.x*sw,y:p.y*sh)
-                            context.stroke(Path(ellipseIn:CGRect(x:c.x-8,y:c.y-8,width:16,height:16)),with:.color(.red),lineWidth:2)
-                        } }
+                        // Where clicks may go: inside the safe margin, off the HUD areas, and for throws within the grenade circle.
+                        if !report.observation.hudAreas.isEmpty {
+                            let m=Policy.edgeMargin*sh, p=report.observation.player, r=report.throwRadius*sh
+                            context.stroke(Path(CGRect(x:m,y:m,width:sw-2*m,height:sh-2*m)),with:.color(.white.opacity(0.25)),style:StrokeStyle(lineWidth:1,dash:[2,4]))
+                            for area in report.observation.hudAreas { context.stroke(Path(box(area)),with:.color(.red.opacity(0.55)),style:StrokeStyle(lineWidth:1,dash:[3,3])) }
+                            context.stroke(Path(ellipseIn:CGRect(x:p.x*sw-r,y:p.y*sh-r,width:2*r,height:2*r)),with:.color(.orange.opacity(0.35)),lineWidth:1)
+                        }
+                        for intent in report.decision.intents {
+                            if case .aim(let p)=intent {
+                                let c=CGPoint(x:p.x*sw,y:p.y*sh)
+                                context.stroke(Path(ellipseIn:CGRect(x:c.x-8,y:c.y-8,width:16,height:16)),with:.color(.red),lineWidth:2)
+                            } else if case .throwAt(let p)=intent {
+                                let c=CGPoint(x:p.x*sw,y:p.y*sh)
+                                context.stroke(Path(ellipseIn:CGRect(x:c.x-12,y:c.y-12,width:24,height:24)),with:.color(.orange),style:StrokeStyle(lineWidth:2,dash:[4,3]))
+                            }
+                        }
                     }.frame(width:size.width,height:size.height)
                 } else { ContentUnavailableView("Waiting for the game",systemImage:"viewfinder",description:Text("Open ZombsRoyale in Chrome and select its window.")) }
             }

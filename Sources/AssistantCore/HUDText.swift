@@ -64,11 +64,23 @@ public enum HUDText {
                                          weaponClass: weaponClass, rarity: rarity, count: count, confidence: confidence)
             }
             if catalog.throwableWords.contains(where: { phrase.contains($0) }) {
-                return InteractionPrompt(name: name, subtitle: subtitle, kind: .throwable, itemID: ItemCatalog.throwableID,
+                return InteractionPrompt(name: name, subtitle: subtitle, kind: .throwable, itemID: catalog.throwable(named: name)?.id ?? ItemCatalog.throwableID,
                                          rarity: rarity, count: count, confidence: confidence)
             }
             if catalog.healingWords.contains(phrase), let heal = catalog.heal(named: name) {
                 return InteractionPrompt(name: name, subtitle: subtitle, kind: .healing, itemID: heal.id, rarity: rarity, count: count, confidence: confidence)
+            }
+            // Unique items are named, not classed ("Gift Launcher / Legendary Unique", "Crossbow / Mythic Unique"). A launcher
+            // or bow the catalog names gets its class; such weapons only ever finish combos. A throwable of that name (the
+            // Shuriken) is a throwable. Other unique guns (the Minigun, the Flamethrower) stay unrecognized, as before.
+            if phrase == "unique" {
+                if let model = catalog.model(named: name, weaponClass: nil), catalog.weapon(model.weaponClass)?.role == nil {
+                    return InteractionPrompt(name: name, subtitle: subtitle, kind: .weapon, itemID: catalog.weaponID(model.weaponClass, rarity, name: name),
+                                             weaponClass: model.weaponClass, rarity: rarity, count: count, confidence: confidence)
+                }
+                if let throwable = catalog.throwable(named: name) {
+                    return InteractionPrompt(name: name, subtitle: subtitle, kind: .throwable, itemID: throwable.id, rarity: rarity, count: count, confidence: confidence)
+                }
             }
             return InteractionPrompt(name: name, subtitle: subtitle, kind: .other, rarity: rarity, count: count, confidence: confidence)
         }
@@ -79,7 +91,7 @@ public enum HUDText {
                                      count: count, confidence: confidence)
         }
         if catalog.throwableWords.contains(lowered) {
-            return InteractionPrompt(name: name, subtitle: subtitle, kind: .throwable, itemID: ItemCatalog.throwableID,
+            return InteractionPrompt(name: name, subtitle: subtitle, kind: .throwable, itemID: catalog.throwable(named: name)?.id ?? ItemCatalog.throwableID,
                                      count: count, confidence: confidence)
         }
         if isContainer(name: name, subtitle: subtitle) {
@@ -106,7 +118,7 @@ public enum HUDText {
     /// The subtitle phrases the panel can show: "<rarity> <class>", consumable and throwable words, "Interact".
     static func subtitles(_ catalog: ItemCatalog) -> [String] {
         var phrases = Rarity.allCases.flatMap { rarity in catalog.classWords.keys.map { "\(rarity.name.lowercased()) \($0)" } }
-        phrases += Rarity.allCases.flatMap { rarity in catalog.throwableWords.map { "\(rarity.name.lowercased()) \($0)" } }
+        phrases += Rarity.allCases.flatMap { rarity in (catalog.throwableWords + ["unique"]).map { "\(rarity.name.lowercased()) \($0)" } }
         return phrases + catalog.healingWords + catalog.throwableWords + ["interact"]
     }
     static func knownSubtitle(_ subtitle: String, catalog: ItemCatalog) -> Bool {
@@ -114,7 +126,8 @@ public enum HUDText {
         let words = lowered.split(separator: " ")
         if let first = words.first, Rarity(word: String(first)) != nil {
             let phrase = words.dropFirst().joined(separator: " ")
-            if catalog.classWords[phrase] != nil || catalog.throwableWords.contains(where: { phrase.contains($0) }) || catalog.healingWords.contains(phrase) { return true }
+            if catalog.classWords[phrase] != nil || catalog.throwableWords.contains(where: { phrase.contains($0) }) || catalog.healingWords.contains(phrase)
+                || phrase == "unique" { return true }
         }
         return catalog.healingWords.contains(lowered) || catalog.throwableWords.contains(lowered) || lowered == "interact"
     }

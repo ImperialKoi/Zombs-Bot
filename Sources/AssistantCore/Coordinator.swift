@@ -22,7 +22,7 @@ public final class Coordinator {
         /// When the HUD stopped reading clearly during this heal.
         var uncertainSince: Double?
     }
-    /// A weapon swapped out for a consumable, to be picked up again after healing.
+    /// A gun or utility item swapped out for a consumable, to be picked up again after healing.
     private struct Recovery {
         var slot: Int; var weapon: String; var consumable: String
         var created: Double; var consumed: Double?
@@ -40,8 +40,8 @@ public final class Coordinator {
     private var vitals: [(time: Double, health: Double, shield: Double)] = []
     /// Health and shield still to arrive from doses that heal over time (hybrids), each spread evenly until `until`.
     private var arriving: [(item: String, health: Double, shield: Double, from: Double, until: Double)] = []
-    /// How many of its consumable each slot holds. The slot's digits are rarely readable, so the assistant counts its own
-    /// pickups and drinks. A stack it did not see arrive counts as one ground stack and is not `known`.
+    /// How many of its consumable or utility item each slot holds. The slot's digits are rarely readable, so the assistant
+    /// counts its own pickups, drinks and throws. A stack it did not see arrive counts as one ground stack and is not `known`.
     private struct StackCount { var item: String; var count: Int; var known: Bool }
     private var stacks: [Int: StackCount] = [:]
     /// A consumable just picked up whose slot has not shown yet: the slot it appears in gets this count.
@@ -83,6 +83,26 @@ public final class Coordinator {
     private var priorWeaponSlot: Int?
     private var band: WeaponRole?
     private var lastRangeSwitch = -Double.infinity
+    /// A Reverse Impulse combo under way (see `Combos`): the plan, the opponent as last seen, and what has been thrown.
+    private struct Combo {
+        var plan: Combos.Plan
+        var target: PlayerTrack
+        var seen: Double
+        var started: Double
+        /// The spot both land on, followed on screen from the first throw.
+        var mark: GroundMark?
+        /// When the first item was thrown, the pull was thrown, and the second grenade was thrown.
+        var firstThrow: Double?
+        var pulled: Double?
+        var secondThrow: Double?
+        var shots = 0
+    }
+    private var combo: Combo?
+    private var lastCombo = -Double.infinity
+    /// When you last chose a slot yourself.
+    private var lastUserSlotChange = -Double.infinity
+    /// A lethal grenade of yours on its way, and when it goes off; the app warns you to keep clear.
+    public private(set) var liveGrenade: (name: String, explodes: Double)?
 
     public init(profiles: [ItemProfile], settings: CombatSettings = .init()) {
         self.profiles = Dictionary(profiles.filter(\.isValid).map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
@@ -98,6 +118,7 @@ public final class Coordinator {
         cooldownUntil = -.infinity; pickupBlockedUntil = [:]; chestBlockedUntil = [:]; interactPresses = [:]; priorWeaponSlot = nil
         band = nil; lastRangeSwitch = -.infinity; lastTargetSeen = -.infinity; healAttempts = []; healPausedUntil = -.infinity
         lastRequested = nil; lastSelection = nil; userChoiceUntil = -.infinity; lootNote = nil; lastIdleRequest = -.infinity
+        combo = nil; lastCombo = -.infinity; lastUserSlotChange = -.infinity; liveGrenade = nil
     }
     /// A target missed for less than this keeps its distance band and identity.
     static let targetMemory = 1.0
@@ -149,6 +170,20 @@ public final class Coordinator {
     }
     /// A gun replaces one of its role only when it is worth this much more: two rank places, or any rarity step.
     static let upgradeMargin = 1.5
+    /// The loadout the assistant works toward: a sniper, an assault rifle and an SMG, then one slot for a utility item
+    /// (`isUtility`) or heals, and one for heals. A gun of the class wanted for its range beats any other gun there, so an
+    /// SMG replaces a shotgun; within a class, the gun ranking decides.
+    static let loadoutClass: [WeaponRole: WeaponClass] = [.long: .sniper, .medium: .ar, .close: .smg]
+    static func inLoadout(_ p: ItemProfile) -> Bool { p.role.map { loadoutClass[$0] == p.weaponClass } ?? false }
+    /// Worth of a gun for its range: the loadout's class first, then `value`.
+    static func keep(_ p: ItemProfile) -> Double { (inLoadout(p) ? 1000 : 0) + value(p) }
+    /// Whether a gun replaces one of its range: of the loadout's class when the other is not, else worth `upgradeMargin` more.
+    static func better(_ incoming: ItemProfile, than held: ItemProfile) -> Bool {
+        inLoadout(incoming) != inLoadout(held) ? inLoadout(incoming) : value(incoming) > value(held) + upgradeMargin
+    }
+    /// Grenades, Reverse Impulses, a Grappling Hook: a throwable the catalog names. The loadout has room for one; the best
+    /// by `ItemProfile.power` stays.
+    static func isUtility(_ p: ItemProfile) -> Bool { p.kind == .throwable && p.effect != nil }
     /// Score of a weapon for a distance band: class preference, then rarity and how good the gun is for its class.
     static func bandScore(_ p: ItemProfile, band: WeaponRole) -> Double? {
         preference(p, band: band).map { $0 + Double(p.tier) * 2 + p.edge }
@@ -167,9 +202,11 @@ public final class Coordinator {
     }
 
     public func step(_ o: Observation, now t: Double) -> Decision {
+        if let live = liveGrenade, t > live.explodes + 0.3 { liveGrenade = nil }
         if let reason = Policy.haltReason(o, now: t) {
             pending = nil; heal = nil; healPlan = nil; recovery = nil; targetID = nil; lastThreat = t; priorWeaponSlot = nil; band = nil
             healAttempts = []; inHandSince = nil // A halted heal did not fail.
+            if combo != nil { combo = nil; lastCombo = t } // What was thrown stays thrown; the rest is off.
             // A slot you press while taking over shows as a change afterwards; a new match does not.
             if !o.manualOverride { lastSelection = nil }
             // A key you press yourself may have added to a stack or drunk from one.
@@ -178,11 +215,13 @@ public final class Coordinator {
         }
         guard o.timestamp > lastFrame else { return idle(o.timestamp, "Awaiting a new frame") }
         lastFrame = o.timestamp
+        // A combo's spot moves on screen with you in every frame, also while a slot switch is on its way.
+        if var c = combo, var mark = c.mark { mark.follow(o, zoom: viewZoom(o, keeping: mark.zoom)); c.mark = mark; combo = c }
         if lastThreat == nil { lastThreat = t }
         lootNote = nil
         if o.selectedSlotConfidence >= 0.98, let current = o.selectedSlot {
             if let previous = lastSelection, previous != current, !(lastRequested.map { $0.slot == current && t - $0.time <= 2 } ?? false) {
-                userChoiceUntil = t + settings.idleUserRespect
+                userChoiceUntil = t + settings.idleUserRespect; lastUserSlotChange = t
             }
             lastSelection = current
         }
@@ -262,9 +301,7 @@ public final class Coordinator {
             // its drink time has passed and health or shield rose (a hybrid's gains start a moment later).
             if slot!.isKnownEmpty || elapsed >= h.duration + 0.15 && (gained >= 1 || (slot!.count < h.count && slot!.confidence >= 0.98)) {
                 heal = nil; cooldownUntil = t + 0.2; healAttempts = []
-                if let held = stacks[h.slot], held.item == h.item {
-                    stacks[h.slot] = StackCount(item: h.item, count: max(1, held.count - 1), known: held.known && held.count > 1)
-                }
+                usedOne(h.slot, h.item)
                 if let item = profiles[h.item], item.overTime > 0 {
                     let gain = HealPlanner.restored(item, health: min(100, h.health + earlier.health), shield: min(100, h.shield + earlier.shield))
                     let seen = min(gained, gain.health + gain.shield)
@@ -287,8 +324,8 @@ public final class Coordinator {
                 if o.selectedSlot == slot && o.selectedSlotConfidence >= 0.98 && t >= settle { pending = nil }
                 else if t >= deadline { pending = nil; recovery = nil; cooldownUntil = t + 1; return idle(o.timestamp, "Slot selection timed out") }
                 // A slot switch on its way does not hold up a chest or an item for a free slot; while it brings a potion to
-                // you low on health, only another potion.
-                else if !threatened, let decision = takeLoot(o, now: t, safeToHeal: safeToHeal, swapWait: "waiting for slot \(slot)",
+                // you low on health, only another potion. A combo's switch is part of a fight.
+                else if !threatened, combo == nil, let decision = takeLoot(o, now: t, safeToHeal: safeToHeal, swapWait: "waiting for slot \(slot)",
                                                              potionsOnly: healPlan != nil && Policy.lowOnHealth(o, settings)) { return decision }
                 else { return idle(o.timestamp, "Waiting for selected slot") }
             case let .pickup(name, item, amount, before, deadline):
@@ -481,14 +518,14 @@ public final class Coordinator {
         return holding.first { $0.slot.index == o.selectedSlot } ?? holding.first
     }
 
-    /// Keeps `stacks` in step with the inventory. A count read off the slot wins. A stack that appears is the pickup just
-    /// made, or else one ground stack (not `known`). An emptied or changed slot starts over.
+    /// Keeps `stacks` in step with the inventory, for consumables and utility items. A count read off the slot wins. A stack
+    /// that appears is the pickup just made, or else one ground stack (not `known`). An emptied or changed slot starts over.
     private func countStacks(_ o: Observation, now t: Double) {
         if let a = arrivingStack, t > a.until { arrivingStack = nil }
         for slot in o.inventory where (2...6).contains(slot.index) && slot.confidence >= 0.98 {
             let wasEmpty = seenEmpty.contains(slot.index)
             if slot.isKnownEmpty { seenEmpty.insert(slot.index) } else { seenEmpty.remove(slot.index) }
-            guard let id = slot.itemID, let p = profiles[id], p.kind == .healing else { stacks[slot.index] = nil; continue }
+            guard let id = slot.itemID, let p = profiles[id], p.kind == .healing || Self.isUtility(p) else { stacks[slot.index] = nil; continue }
             let cap = p.maxStack ?? Int.max
             if slot.count > 1 { stacks[slot.index] = StackCount(item: id, count: min(slot.count, cap), known: true); continue }
             guard stacks[slot.index]?.item != id else { continue }
@@ -500,10 +537,17 @@ public final class Coordinator {
         }
     }
 
-    /// Counts a consumable pickup: into the slot that gained it, else onto the stack of it with room, else into the slot
-    /// it shows up in shortly.
+    /// One of the stack in this slot was used: a dose drunk or a grenade thrown.
+    private func usedOne(_ slot: Int, _ item: String) {
+        if let held = stacks[slot], held.item == item {
+            stacks[slot] = StackCount(item: item, count: max(1, held.count - 1), known: held.known && held.count > 1)
+        }
+    }
+
+    /// Counts a consumable or utility pickup: into the slot that gained it, else onto the stack of it with room, else into
+    /// the slot it shows up in shortly.
     private func countPickup(_ item: String, amount: Int, before: [InventorySlot], in o: Observation, now t: Double) {
-        guard let p = profiles[item], p.kind == .healing else { return }
+        guard let p = profiles[item], p.kind == .healing || Self.isUtility(p) else { return }
         let cap = p.maxStack ?? Int.max
         if let slot = o.inventory.first(where: { s in (2...6).contains(s.index) && s.itemID == item && before.first { $0.index == s.index }?.itemID != item }) {
             stacks[slot.index] = StackCount(item: item, count: min(amount, cap), known: true)
@@ -560,6 +604,8 @@ public final class Coordinator {
     }
 
     private func combat(_ o: Observation, now t: Double) -> Decision? {
+        // A combo also reaches opponents behind cover: the pull brings them out.
+        if let decision = comboStep(o, now: t) { return decision }
         let targets = o.players.filter { Policy.validEnemy($0, settings) && Policy.canFireToward(o, at: $0.position) }
             .sorted { $0.position.distance(to: o.player, aspect: o.aspect) < $1.position.distance(to: o.player, aspect: o.aspect) }
         guard var target = targets.first else {
@@ -576,10 +622,13 @@ public final class Coordinator {
         let distance = target.position.distance(to: o.player, aspect: o.aspect) * zoom
         let band = band(for: distance)
         self.band = band
-        let armed = o.inventory.compactMap { slot -> (InventorySlot, ItemProfile)? in
+        let carried = o.inventory.compactMap { slot -> (InventorySlot, ItemProfile)? in
             guard let p = profile(slot), p.kind == .weapon, p.role != nil, slot.hasAnyAmmo else { return nil }
             return (slot, p)
         }
+        // Exploding rounds hurt you too: a gun whose round would go off near you (the Assault SCAR on an opponent next to
+        // you, or with a tree in the way) is not used on this one.
+        let armed = carried.filter { Policy.explosiveSafe(o, weapon: $0.1, toward: target.position, zoom: zoom) }
         var weapons = armed.compactMap { slot, p -> (InventorySlot, ItemProfile, Double)? in
             guard distance <= p.maxRange, var score = Self.bandScore(p, band: band) else { return nil }
             if slot.index == o.selectedSlot {
@@ -593,7 +642,10 @@ public final class Coordinator {
             weapons = armed.map { slot, p in (slot, p, p.maxRange + (slot.index == o.selectedSlot ? 0.01 : 0) - (slot.ammo == 0 ? 1 : 0)) }
                 .sorted { $0.2 > $1.2 }
         }
-        guard var (slot, p, _) = weapons.first else { return idle(o.timestamp, "No identified firearm with ammunition") }
+        guard var (slot, p, _) = weapons.first else {
+            if let risky = carried.first?.1 { return idle(o.timestamp, "Not firing \(risky.name): its explosion would hit you too") }
+            return idle(o.timestamp, "No identified firearm with ammunition")
+        }
         if o.selectedSlot != slot.index || o.selectedSlotConfidence < 0.98 {
             // A held weapon that still works keeps firing until the dwell time has passed.
             if o.selectedSlotConfidence >= 0.98, let held = weapons.first(where: { $0.0.index == o.selectedSlot }),
@@ -624,9 +676,164 @@ public final class Coordinator {
         }
         let aim = intercept.point
         guard Policy.canFireToward(o, at: aim) else { return idle(o.timestamp, "Predicted firing path blocked") }
+        guard Policy.explosiveSafe(o, weapon: p, toward: aim, zoom: p.zoom) else {
+            return Decision(o.timestamp, [.releaseAll, .aim(aim)], "Holding fire: \(p.name)'s explosion would hit you too")
+        }
         if !p.automatic && t - lastShot < p.shotInterval { return Decision(o.timestamp, [.releaseAll,.aim(aim)], "Weapon cooldown") }
         lastShot = t
         return Decision(o.timestamp, [.aim(aim),.fire], "Engage enemy at \(band.rawValue) range with \(p.name)")
+    }
+
+    /// The view's zoom: the item in hand's. While the selection is unreadable, the last one is kept.
+    private func viewZoom(_ o: Observation, keeping last: Double) -> Double {
+        o.selectedSlotConfidence >= 0.98 ? (o.selected.flatMap { profile($0) }?.zoom ?? 1) : last
+    }
+
+    /// The combos that work on this opponent now, best first, with what you hold.
+    private func comboPlans(_ o: Observation, on target: PlayerTrack, now t: Double) -> [Combos.Plan] {
+        let held = o.inventory.compactMap { slot -> Combos.Held? in
+            guard let p = profile(slot), p.kind != .weapon || noAmmoUntil[slot.index] == nil else { return nil }
+            return Combos.Held(slot: slot, item: p)
+        }
+        let zoom = o.selected.flatMap { profile($0) }?.zoom ?? 1
+        return Combos.plans(on: target, in: o, holding: held, inHand: o.selectedSlotConfidence >= 0.98 ? o.selectedSlot : nil, zoom: zoom,
+                            settings: settings, now: t)
+    }
+
+    /// Starts or carries on a Reverse Impulse combo (see `Combos`). Nil when none is under way or worth starting, and once
+    /// one is over, so the fight goes on with guns. Each step checks again that it is still safe and still worth it.
+    private func comboStep(_ o: Observation, now t: Double) -> Decision? {
+        if combo == nil {
+            guard features.combos, heal == nil, healPlan == nil, t - lastCombo >= Combos.cooldown, o.selectedSlotConfidence >= 0.98 else { return nil }
+            let enemies = o.players.filter { Policy.validEnemy($0, settings) && $0.motion != nil }
+                .sorted { $0.position.distance(to: o.player, aspect: o.aspect) < $1.position.distance(to: o.player, aspect: o.aspect) }
+            guard let (target, plan) = enemies.prefix(3).lazy.compactMap({ e in self.comboPlans(o, on: e, now: t).first.map { (e, $0) } }).first
+            else { return nil }
+            combo = Combo(plan: plan, target: target, seen: t, started: t)
+        }
+        guard var c = combo else { return nil }
+        func end(_ reason: String?) -> Decision? {
+            combo = nil; lastCombo = t
+            return reason.map { idle(o.timestamp, $0) }
+        }
+        guard features.combos else { return end(nil) }
+        guard let pull = profiles[c.plan.pull], let follow = profiles[c.plan.follow] else { return end(nil) }
+        lastTargetSeen = t
+        let zoom = viewZoom(o, keeping: c.mark?.zoom ?? 1)
+        // The opponent: its track, or an enemy right where it was (a track can be lost and found again).
+        if let seen = o.players.first(where: { $0.id == c.plan.target && Policy.validEnemy($0, settings) }) {
+            c.target = seen; c.seen = t
+        } else if let near = o.players.filter({ Policy.validEnemy($0, settings) })
+                    .min(by: { $0.position.distance(to: c.target.position, aspect: o.aspect) < $1.position.distance(to: c.target.position, aspect: o.aspect) }),
+                  near.position.distance(to: c.target.position, aspect: o.aspect) <= 0.06 {
+            c.target = near; c.seen = t; c.plan.target = near.id
+        }
+        combo = c
+        if lastUserSlotChange > c.started { return end("Combo stopped: you changed slots") }
+        if t - c.started > Combos.maxDuration { return end("Combo stopped: it took too long") }
+        let latency = settings.leadLatency, margin = Policy.blastMargin
+        /// The slot still holds the item, ready to use; selects it when it is not in hand yet.
+        func take(_ index: Int, _ item: ItemProfile, reason: String) -> Decision? {
+            guard let slot = o.slot(index), profile(slot)?.id == item.id, slot.count > 0,
+                  item.kind != .weapon || slot.hasAnyAmmo && (slot.ammo ?? 1) > 0 else { return end("Combo stopped: \(item.name) is not ready in slot \(index)") }
+            if o.selectedSlot != index { return select(slot, in: o, now: t, reason: reason) }
+            // A readout showing rounds means a gun is in hand: a throwable click would fire it.
+            if item.kind == .throwable && o.gunInHand == true { return end("Combo stopped: slot \(index) holds a gun, not \(item.name)") }
+            return nil
+        }
+
+        guard let firstThrow = c.firstThrow, let mark = c.mark else {
+            let first = c.plan.first == follow.id ? follow : pull
+            guard t - c.started <= Combos.startLimit else { return end("Combo stopped: \(first.name) never came to hand") }
+            guard t - c.seen <= 0.3 else { return end("Combo stopped: lost sight of the opponent") }
+            let title: String
+            switch c.plan.finisher {
+            case .grenade: title = "Rev-nade: \(first.name), then \(first.id == pull.id ? follow.name : pull.name) on the same spot"
+            case .gun: title = "Combo: \(pull.name), then \(follow.name) as the opponent lands"
+            case .close: title = "Combo: \(pull.name) at your feet, then \(follow.name)"
+            }
+            if let decision = take(c.plan.firstSlot, first, reason: "\(title): take \(first.name)") { return decision }
+            // In hand, plan again: the opponent has moved on, and the throwable's view is the default one.
+            guard let fresh = comboPlans(o, on: c.target, now: t).first(where: {
+                $0.finisher == c.plan.finisher && $0.pullSlot == c.plan.pullSlot && $0.followSlot == c.plan.followSlot
+            }) else { return end("Combo off: no safe spot to throw \(first.name) now") }
+            c.plan = fresh; c.firstThrow = t; c.mark = GroundMark(fresh.point, zoom: zoom, time: o.timestamp)
+            if first.id == pull.id { c.pulled = t } else { liveGrenade = (follow.name, t + latency + follow.fuse) }
+            usedOne(c.plan.firstSlot, first.id)
+            combo = c
+            return Decision(o.timestamp, [.releaseAll, .throwAt(fresh.point)], title)
+        }
+        // The click is let go where it was made before anything else.
+        if t - max(firstThrow, c.secondThrow ?? -.infinity) < Combos.throwHold { return Decision(o.timestamp, [], "Throwing") }
+
+        switch c.plan.finisher {
+        case .grenade:
+            // Once both are thrown, the fight goes on with guns while they go off.
+            guard c.secondThrow == nil else { return end(nil) }
+            let pullFirst = c.plan.gap >= 0
+            let item = pullFirst ? follow : pull
+            let due = firstThrow + abs(c.plan.gap)
+            if t > due + Combos.lateLimit { return end("Rev-nade off: \(item.name) would come too late") }
+            if let decision = take(pullFirst ? c.plan.followSlot : c.plan.pullSlot, item, reason: "Rev-nade: take \(item.name)") { return decision }
+            if t < due {
+                // An opponent clearly getting away from the Frag is fought with guns instead of waited for.
+                if !pullFirst, t - c.seen <= 0.3, Combos.predicted(c.target, in: o, after: due - t + latency + pull.fuse, now: t, settings: settings)
+                    .distance(to: mark.point, aspect: o.aspect) > 2 * pull.radius * Combos.reach {
+                    return end("Rev-nade off: the opponent got away from the \(follow.name)")
+                }
+                return Decision(o.timestamp, [.releaseAll], "Rev-nade: \(item.name) in \(String(format: "%.1f", due - t)) s")
+            }
+            if pullFirst {
+                // The blast lands where the pull is bringing the opponent; you must be clear of it when it goes off.
+                guard o.players.contains(where: { Policy.validEnemy($0, settings) && $0.position.distance(to: mark.point, aspect: o.aspect) <= max(follow.radius, pull.radius) + 0.06 })
+                else { return end("Rev-nade off: nobody at the spot") }
+                guard Policy.throwSafe(o, item: follow, at: mark.point, settings: settings),
+                      (mark.point + Combos.drift(o, after: latency + follow.fuse, settings: settings)).distance(to: o.player, aspect: o.aspect) >= follow.radius + margin
+                else { return end("Rev-nade off: \(follow.name) would go off too close to you") }
+                liveGrenade = (follow.name, t + latency + follow.fuse)
+            } else {
+                // The pull must still catch the opponent, and never you: it would drag you into your own blast.
+                let pullOff = latency + pull.fuse
+                guard t - c.seen <= 0.3 else { return end("Rev-nade off: lost sight of the opponent") }
+                guard Combos.predicted(c.target, in: o, after: pullOff, now: t, settings: settings).distance(to: mark.point, aspect: o.aspect)
+                        <= pull.radius * Combos.reach, c.target.position.distance(to: mark.point, aspect: o.aspect) <= pull.radius + 0.06
+                else { return end("Rev-nade off: the opponent got away from the \(follow.name)") }
+                guard Policy.throwSafe(o, item: pull, at: mark.point, settings: settings),
+                      (mark.point + Combos.drift(o, after: pullOff, settings: settings)).distance(to: o.player, aspect: o.aspect) >= pull.radius + margin
+                else { return end("Rev-nade off: \(pull.name) would pull you into your own \(follow.name)") }
+                c.pulled = t
+            }
+            c.secondThrow = t; combo = c
+            usedOne(pullFirst ? c.plan.followSlot : c.plan.pullSlot, item.id)
+            return Decision(o.timestamp, [.releaseAll, .throwAt(mark.point)], "Rev-nade: \(item.name) on the spot")
+        case .gun, .close:
+            guard let pulled = c.pulled else { return end(nil) }
+            let arrive = Combos.arrival(thrown: pulled, pull: pull, settings: settings)
+            if t > arrive + Combos.window || c.shots > 0 && !follow.automatic { return end(nil) }
+            if let decision = take(c.plan.followSlot, follow, reason: "Combo: take \(follow.name) for the pull") { return decision }
+            // The opponent landing: an enemy right at the spot once the pull has gone off, else the spot itself.
+            var aim = mark.point
+            if c.plan.finisher == .gun, t >= arrive - pull.pullDuration,
+               let landed = o.players.filter({ $0.affiliation == .enemy }).min(by: {
+                   $0.position.distance(to: mark.point, aspect: o.aspect) < $1.position.distance(to: mark.point, aspect: o.aspect) }),
+               landed.position.distance(to: mark.point, aspect: o.aspect) <= 0.04 { aim = landed.position }
+            // The shot arrives just after the opponent does, and only with an opponent there or on the way.
+            let flight = follow.projectileSpeed > 0 ? aim.distance(to: o.player, aspect: o.aspect) * zoom / follow.projectileSpeed : 0
+            if t < arrive + Combos.settle - flight - latency {
+                return Decision(o.timestamp, [.releaseAll, .aim(aim)], "Combo: \(follow.name) on the spot, waiting for the pull")
+            }
+            let reach = Policy.pullReach(profiles.values)
+            guard o.players.contains(where: { $0.affiliation == .enemy && $0.affiliationConfidence >= settings.minAffiliationConfidence
+                                              && $0.position.distance(to: aim, aspect: o.aspect) <= reach }) else {
+                return Decision(o.timestamp, [.releaseAll, .aim(aim)], "Combo: \(follow.name) on the spot, no opponent there")
+            }
+            guard Policy.canFireToward(o, at: aim), Policy.explosiveSafe(o, weapon: follow, toward: aim, zoom: zoom) else {
+                return Decision(o.timestamp, [.releaseAll, .aim(aim)], "Combo: holding \(follow.name): the line to the spot is not clear")
+            }
+            if !follow.automatic && t - lastShot < follow.shotInterval { return Decision(o.timestamp, [.releaseAll, .aim(aim)], "Weapon cooldown") }
+            c.shots += 1; combo = c; lastShot = t
+            return Decision(o.timestamp, [.aim(aim), .fireAtPull], "Combo: \(follow.name) at the spot as the opponent lands")
+        }
     }
 
     /// Opening a chest or taking an item is one key press, and the loot stays behind once you walk on, so it comes before
@@ -671,8 +878,10 @@ public final class Coordinator {
         return Decision(o.timestamp, [.releaseAll, .open(prompt.name)], press > 1 ? "Open \(prompt.name) (press \(press))" : "Open \(prompt.name)")
     }
 
-    /// Decides on the item the prompt names, read by text recognition ("M4 / Epic AR"): a gun is weighed by its place in
-    /// the gun ranking and its rarity (`ItemProfile.power`) against the gun of its range it would join or replace.
+    /// Decides on the item the prompt names, read by text recognition ("M4 / Epic AR"), working toward the loadout: a
+    /// sniper, an AR and an SMG, one slot for a utility item or heals, one for heals (`loadoutClass`, `isUtility`). A gun is
+    /// weighed by its class and then its place in the gun ranking and its rarity (`ItemProfile.power`) against the guns of
+    /// its range. What the loadout has no place for (a second gun for a range, utility beyond one) is the first to go.
     private func loot(_ o: Observation, now t: Double, safeToHeal: Bool, swapWait: String?, potionsOnly: Bool = false) -> Decision? {
         guard let prompt = Policy.pickupPrompt(o), let id = prompt.itemID, let incoming = profiles[id], incoming.verified,
               !potionsOnly || incoming.kind == .healing else { return nil }
@@ -682,33 +891,63 @@ public final class Coordinator {
             return pickup(prompt, replacing: slot, in: o, now: t, reason: reason)
         }
         func name(_ slot: InventorySlot) -> String { profile(slot)?.name ?? "slot \(slot.index)" }
+        func keep(_ slot: InventorySlot) -> Double { Self.keep(profile(slot)!) }
         guard pickupBlockedUntil[prompt.name] == nil else { return skip("just tried") }
         let slots = o.inventory.filter { (2...6).contains($0.index) }
         guard slots.count == 5 else { return skip("inventory not fully read") }
         let empty = slots.filter(\.isKnownEmpty)
         let weapons = slots.filter { profile($0).map { $0.kind == .weapon && $0.role != nil } ?? false }
         let heals = slots.filter { profile($0)?.kind == .healing }
+        // Utility items, the one the loadout keeps first.
+        let utility = slots.filter { profile($0).map(Self.isUtility) ?? false }.sorted { Self.value(profile($0)!) > Self.value(profile($1)!) }
         let missingRoles = WeaponRole.allCases.filter { role in !weapons.contains { profile($0)?.role == role } }
+        // What the loadout has no place for, least needed first: a second gun for a range (the weaker), then utility
+        // beyond the one kept. Launchers, bows and items it cannot name are yours to manage and never go.
+        let spareGuns = WeaponRole.allCases.flatMap { role in weapons.filter { profile($0)?.role == role }.sorted { keep($0) > keep($1) }.dropFirst() }
+            .sorted { keep($0) < keep($1) }
+        let spare = spareGuns + utility.dropFirst().reversed()
         switch incoming.kind {
         case .weapon:
             guard let role = incoming.role else { return skip("launchers and special weapons stay manual") }
             let sameRole = weapons.filter { profile($0)?.role == role }
-            if let worst = sameRole.min(by: { Self.value(profile($0)!) < Self.value(profile($1)!) }) {
-                guard Self.value(incoming) > Self.value(profile(worst)!) + Self.upgradeMargin else { return skip("not better than \(name(worst))") }
+            if let best = sameRole.max(by: { keep($0) < keep($1) }), let worst = sameRole.min(by: { keep($0) < keep($1) }) {
+                guard Self.better(incoming, than: profile(best)!) else { return skip("not better than \(name(best))") }
                 return empty.isEmpty ? take(replacing: worst, "Pick up \(incoming.name) in place of \(name(worst))")
                     : take("Pick up \(incoming.name): better than \(name(worst))")
             }
             if !empty.isEmpty { return take("Pick up \(incoming.name) for \(role.rawValue) range") }
-            // Full: give up a duplicate-role weapon, then a consumable beyond the kept minimum.
-            let duplicates = weapons.filter { slot in weapons.filter { profile($0)?.role == profile(slot)?.role }.count > 1 }
-            if let victim = duplicates.min(by: { Self.value(profile($0)!) < Self.value(profile($1)!) }) {
+            // Full: what the loadout has no place for goes first, then a heal or the utility beyond the slots kept for
+            // them, keeping a heal.
+            if let victim = spare.first {
                 return take(replacing: victim, "Pick up \(incoming.name) for \(role.rawValue) range in place of \(name(victim))")
             }
-            if heals.count > settings.minHealSlots,
-               let victim = heals.min(by: { Policy.healingBenefit(profile($0)!, in: o) < Policy.healingBenefit(profile($1)!, in: o) }) {
+            if heals.count + utility.count > settings.minHealSlots,
+               let victim = heals.count > 1 ? heals.min(by: { Policy.healingBenefit(profile($0)!, in: o) < Policy.healingBenefit(profile($1)!, in: o) }) : utility.last {
                 return take(replacing: victim, "Pick up \(incoming.name) for \(role.rawValue) range in place of \(name(victim))")
             }
             return skip(slots.contains { $0.confidence < 0.98 } ? "inventory full and some slots unrecognized" : "inventory full")
+        case .throwable:
+            // The loadout's one utility item: more of it stacks, a better one replaces it, and one goes into a free slot
+            // that no missing gun needs.
+            let same = utility.filter { $0.itemID == id }
+            if let stack = same.first(where: { (stackRoom($0) ?? 0) > 0 }), let held = stacks[stack.index] {
+                return take("Pick up \(incoming.name): \(held.count) of \(incoming.maxStack ?? held.count) held")
+            }
+            if same.contains(where: { stackRoom($0) == nil }) {
+                if !empty.isEmpty { return take("Pick up more \(incoming.name)") }
+                return skip("its stack may be full, and the inventory is full")
+            }
+            if !same.isEmpty { return skip("its stack is full") }
+            if let kept = utility.first, let weakest = utility.last {
+                guard Self.value(incoming) > Self.value(profile(weakest)!) else { return skip("your utility slot holds \(name(kept))") }
+                return empty.isEmpty ? take(replacing: weakest, "Pick up \(incoming.name) in place of \(name(weakest))")
+                    : take("Pick up \(incoming.name): better than \(name(weakest))")
+            }
+            if empty.count > missingRoles.count { return take("Pick up \(incoming.name) for your utility slot") }
+            if empty.isEmpty, let victim = spareGuns.first {
+                return take(replacing: victim, "Pick up \(incoming.name) in place of \(name(victim)), a second gun for its range")
+            }
+            return skip(empty.isEmpty ? "inventory full" : "keeping free slots for missing guns")
         case .healing:
             let amount = stackSize(prompt, incoming)
             let helps = Policy.healingBenefit(incoming, in: o) >= Policy.minHealingBenefit
@@ -719,25 +958,30 @@ public final class Coordinator {
                 return take("Pick up \(incoming.name): \(held.count) of \(incoming.maxStack ?? held.count) held" + (urgent ? ", low on health" : ""))
             }
             // A stack whose count is a guess may be full. With a free slot the item lands there at worst; with none the game
-            // would swap out the selected item instead, perhaps a gun.
+            // would swap out the selected item instead, perhaps a gun, so only something the loadout has no place for is
+            // selected first.
             if same.contains(where: { stackRoom($0) == nil }) {
                 if !empty.isEmpty { return take("Pick up \(incoming.name)" + (urgent ? ": low on health" : "")) }
+                if let victim = spare.first { return take(replacing: victim, "Pick up \(incoming.name), or else in place of \(name(victim))") }
                 return skip("its stack may be full, and the inventory is full")
             }
             let stacksFull = !same.isEmpty ? "its stack is full; " : ""
             // Keep enough free slots for the weapon roles still missing, unless you are low on health and it helps now.
             if empty.count > missingRoles.count { return take("Pick up \(incoming.name)") }
             if urgent, !empty.isEmpty { return take("Pick up \(incoming.name): low on health") }
+            // Full, with something the loadout has no place for: the potion takes its slot for good.
+            if empty.isEmpty, let victim = spare.first { return take(replacing: victim, "Pick up \(incoming.name) in place of \(name(victim))") }
             // Full inventory, nothing held that helps now, and a quiet moment to drink it: make room.
             if features.healing, safeToHeal, empty.isEmpty, helps, !heals.contains(where: { Policy.healingBenefit(profile($0)!, in: o) >= Policy.minHealingBenefit }) {
                 // Low on health, a consumable that cannot help now goes first; it is not picked up again.
                 if urgent, let victim = heals.min(by: { profile($0)!.keepValue < profile($1)!.keepValue }) {
                     return take(replacing: victim, "Swap \(name(victim)) for \(incoming.name): low on health")
                 }
-                // Otherwise the weakest gun, to be picked up again once the slot is drunk empty: only for a stack that will all
-                // be drunk now (a single item, or when low, all the doses the heal plan would take).
+                // Otherwise your utility item, else the weakest gun, to be picked up again once the slot is drunk empty: only
+                // for a stack that will all be drunk now (a single item, or when low, all the doses the heal plan would take).
                 let drunk = HealPlanner.plan(health: o.health ?? 100, shield: o.shield ?? 100, stacks: [HealPlanner.Stack(incoming, count: amount)]).count
-                if amount == 1 || urgent && drunk >= amount, let slot = weapons.min(by: { Self.value(profile($0)!) < Self.value(profile($1)!) }), let weapon = slot.itemID {
+                if amount == 1 || urgent && drunk >= amount,
+                   let slot = utility.first ?? weapons.min(by: { Self.value(profile($0)!) < Self.value(profile($1)!) }), let weapon = slot.itemID {
                     if let swapWait { return skip(swapWait) }
                     if recovery == nil { recovery = Recovery(slot: slot.index, weapon: weapon, consumable: id, created: t) }
                     return take(replacing: slot, "Swap \(name(slot)) for \(incoming.name) to heal")

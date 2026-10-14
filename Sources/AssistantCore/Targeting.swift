@@ -26,8 +26,20 @@ public enum Targeting {
     /// The game shoots from your character along the line through the cursor, so only the direction counts. The cursor
     /// goes in that direction but no farther than `radius` view heights from you, and stays `margin` inside the game
     /// area: a click on the window's edge resized or dragged the window. Inside the circle it goes exactly on the point.
+    /// A point on a HUD area in `avoiding` (`Observation.hudAreas`: buttons, the inventory) moves back toward you along
+    /// the same line until it is clear of them, so the aim keeps its direction and no click presses a button.
     /// Distances and the angle are taken in pixel proportions (x scaled by `aspect`), so a wide view does not bend the aim.
-    public static func cursor(toward target: Point, from player: Point, aspect: Double, radius: Double, margin: Double = 0.04) -> Cursor {
+    public static func cursor(toward target: Point, from player: Point, aspect: Double, radius: Double, margin: Double = 0.04,
+                              avoiding: [Rect] = []) -> Cursor {
+        let free = cursorInView(toward: target, from: player, aspect: aspect, radius: radius, margin: margin)
+        guard avoiding.contains(where: { $0.contains(free.point) }) else { return free }
+        var reach = free.point.distance(to: player, aspect: aspect) * aspect
+        func at(_ r: Double) -> Point { Point(player.x + cos(free.angle) * r / aspect, player.y + sin(free.angle) * r) }
+        while reach > 0, avoiding.contains(where: { $0.contains(at(reach)) }) { reach -= 0.005 }
+        return Cursor(point: at(max(0, reach)), angle: free.angle)
+    }
+
+    private static func cursorInView(toward target: Point, from player: Point, aspect: Double, radius: Double, margin: Double) -> Cursor {
         guard target.isFinite, player.isFinite, aspect.isFinite, aspect > 0, radius.isFinite, radius > 0 else { return Cursor(point: player, angle: 0) }
         let dx = (target.x - player.x) * aspect, dy = target.y - player.y
         let length = (dx * dx + dy * dy).squareRoot()

@@ -7,6 +7,7 @@ struct ReplaySummary:Encodable {
     var rejectedActions=0
     var pickupActions=0
     var fireActions=0
+    var throwActions=0
 }
 
 func run() throws {
@@ -33,6 +34,8 @@ func run() throws {
             if !guardrail.permits(intent,observation:observation,now:observation.timestamp,aim:aim) { summary.rejectedActions += 1 }
             if case .pickup=intent { summary.pickupActions += 1 }
             if case .fire=intent { summary.fireActions += 1 }
+            if case .fireAtPull=intent { summary.fireActions += 1 }
+            if case .throwAt=intent { summary.throwActions += 1 }
         }
         summary.frames += 1
         output.append(try encoder.encode(decision)); output.append(10)

@@ -106,9 +106,11 @@ public struct PlayerMotionTracker: Sendable {
     private var nextID = 1
     /// Confirmed tracks the latest update did not detect, with their predicted screen positions.
     public private(set) var held: [(track: Track, position: Point)] = []
+    /// Your own movement on screen (viewport fractions per second); nil until a scenery shift has been measured.
+    public private(set) var ownVelocity: Point?
     public init() {}
 
-    public mutating func reset() { time = nil; camera = Point(); own = nil; tracks = [:]; lastSeen = [:]; hits = [:]; firstSeen = [:]; held = [] }
+    public mutating func reset() { time = nil; camera = Point(); own = nil; tracks = [:]; lastSeen = [:]; hits = [:]; firstSeen = [:]; held = []; ownVelocity = nil }
 
     /// `sceneryShift` is the median normalized screen displacement of static objects since the
     /// previous call, or nil when none were matched. Results follow the order of `players`.
@@ -127,6 +129,7 @@ public struct PlayerMotionTracker: Sendable {
             if let shift = sceneryShift, shift.isFinite {
                 camera = camera - Point(shift.x, shift.y / aspect)
                 own.update(camera, variance: Self.measurementVariance)
+                ownVelocity = Point(own.velocity.x, own.velocity.y * aspect)
             } else {
                 camera = own.position
                 extraVariance = own.velocityVariance * (t - last) * (t - last)

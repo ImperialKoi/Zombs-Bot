@@ -51,7 +51,14 @@ struct CalibrationEditor:View {
                     Slider(value:$draft.combat.aimRadius,in:0.15...0.45,step:0.01) { Text(String(format:"Crosshair circle %.0f%%",draft.combat.aimRadius*100)).frame(width:170,alignment:.leading) }
                     Text("The crosshair stays within this share of the view's height from your character, pointing the same way at opponents farther out, so clicks never land on the window's edges.")
                         .font(.caption).foregroundStyle(.secondary)
-                    Stepper("Keep \(draft.combat.minHealSlots) heal slots when picking up a missing gun",value:$draft.combat.minHealSlots,in:0...4)
+                    Slider(value:$draft.combat.throwRadius,in:0.2...1.25,step:0.05) {
+                        Text(draft.combat.throwRadius >= 1.25 ? "Grenade circle: all" : String(format:"Grenade circle %.0f%%",draft.combat.throwRadius*100)).frame(width:170,alignment:.leading)
+                    }
+                    Text("Grenades land where you click, so Reverse Impulses and grenades are thrown within this share of the view's height from your character. At the far right they may land anywhere on screen, except near its edges. The inventory, buttons, minimap, vitals and the item panel are never clicked.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Stepper("Keep \(draft.combat.minHealSlots) slots for heals and utility when picking up a missing gun",value:$draft.combat.minHealSlots,in:0...4)
+                    Text("The loadout the assistant works toward: sniper, AR, SMG, then a utility item (grenades, Reverse Impulses, a Grappling Hook) or heals, and heals.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }.padding(6)
             }
             Toggle("I verified the mode and key bindings against the game",isOn:$draft.verified)

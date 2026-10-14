@@ -115,6 +115,26 @@ public struct HUDLayout: Codable, Equatable, Sendable {
         return rects
     }
 
+    /// Where a click could press a button or an inventory slot, or land on the HUD: never clicked. Measured on a
+    /// 3840×1736 match and padded: the settings, sound and fullscreen buttons reach 2.7 tiles from the left, the map
+    /// button left of the minimap 4.1 tiles from the right, the stats under it 3.5 tiles down, the name, ammunition and
+    /// vitals 4.9 tiles across and 1.9 up. The interaction panel under your character counts too, as it may be a button.
+    public func noClick(rosterRows: Int) -> [PixelRect] {
+        let u = unit
+        var rects = [
+            PixelRect(0, 0, 3.4 * u, 1.3 * u),                                 // Settings, sound and fullscreen buttons.
+            PixelRect(W - 4.6 * u, 0, 4.6 * u, 4.0 * u),                       // Map button, minimap and match stats.
+            PixelRect(0, H - 2.4 * u, 5.6 * u, 2.4 * u),                       // Name, ammunition and vitals.
+            PixelRect(originX - 0.5 * u, originY - 1.1 * u, W - originX + 0.5 * u, H - originY + 1.1 * u), // Inventory and reserves.
+            PixelRect(prompt.x - 0.3 * u, prompt.y - 0.3 * u, prompt.width + 0.6 * u, prompt.height + 0.6 * u),
+        ]
+        if rosterRows > 0 {
+            let top: Double = rosterName(rosterRows - 1).y - 0.4 * u
+            rects.append(PixelRect(0, top, 3.6 * u, H - top))
+        }
+        return rects
+    }
+
     static func isTile(_ c: RGB) -> Bool { c.distance(HUDGeometry.tileColor) <= 17 }
     /// Strict tile color for edges, so blended selection-border pixels do not count.
     static func isTileEdge(_ c: RGB) -> Bool { c.distance(HUDGeometry.tileColor) <= 11 }
