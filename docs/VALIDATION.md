@@ -2,6 +2,54 @@
 
 Updated October 14, 2026 on this Apple silicon Mac (8 GB M1).
 
+## Faster frames, October 14
+
+You asked to optimize. Replaying recorded matches with text recognition running as in the app, a frame now takes:
+
+| Match | Before p50 / p95 | Now p50 / p95 |
+|---|---|---|
+| Solo 582E17, 3840 × 1736, 300 frames | 12.7–13.5 / 15.9–16.0 ms | 8.4 / 9.3 ms |
+| Duo 212F9A, 2880 × 1376, a 56 s fight | 11.5–11.7 / 14.4–14.8 ms | 7.4–7.7 / 8.8–8.9 ms |
+
+Ranges are three interleaved runs each. All threads together used 12.7–13.1 s of CPU for the 300 Solo frames instead of 18.2–18.7 s, about 18 ms less per frame, with the same JPEG decoding in both. Every recorded decision is unchanged. This was checked offline only.
+
+**Where the time went.** Of the 8.7 ms Core ML took, the Neural Engine was about half. The rest was CPU work around it, because the export's input and outputs were float32: scaling the input by 1/255 and casting it to float16, copying it, and casting both outputs, 2.2 million values, back to float32. Scaling the frame into the model input took 2.7 ms on the GPU, reading the HUD 0.6 ms, and the search for rounds 6.3 ms on another core.
+
+**Changes:**
+- **Float16 model input and outputs** (`tools/training/coreml_io.py`, applied by `train.py`'s export). The rewrite removes those four operations and nothing else; Core ML's compute plan now puts all 267 operations on the Neural Engine, where 4 ran on the CPU before.
+  - The app makes the float16 planes from the scaled frame with a 256-entry table, float16(float32(v) × 0.0039215689), the program's own arithmetic.
+  - It writes them into an IOSurface the Neural Engine reads directly and reuses IOSurfaces for the outputs.
+  - Core ML now takes 4.1 ms instead of 8.7 ms.
+- **The installed detector** is `artifacts/solo-pilot-2026-10-09-960x768-fp16io`: the same weights and the same numbers. Its `validation.json` is the original's, carried over with a note. The app still loads image-input exports.
+- **Overlap.** The detector and the search for rounds start before the HUD is read and run while it is read.
+- **Decoding the outputs.** The best class per anchor is found eight anchors at a time, and mask cells one prototype plane at a time, with the same sums in the same order: 0.65 ms down to 0.55 ms.
+- **Search for rounds** (`BulletDetector`): 4.7 → 1.1 ms at 3,840 wide, 2.9 → 0.7 ms at 2,880. The dark-sample scan is vectorized and packed into bit words, and runs and outlines live in reused buffers.
+
+**Checks:**
+- **Same numbers.** Raw outputs were bit-identical (largest difference 0) on 6 frames through `evaluate.py`'s predictor. Detections and mask cells were identical on 490 Solo, Duo and Squad frames (`ZombsPerceive --compare-model`), the installed copy included.
+- **Same behavior.** Replays with the coordinator (`--decide`, synchronous text) of 1,279 frames give identical JSONL for both models (`tools/compare_replays.py`). The frames were 582E17 0–399, 212F9A 760–1039, AACA5A 0–299 and 78E1A3 600–899.
+- **Same rounds.** Every field of every sighting matched bit for bit on 979 frames from three matches, and on frames 1,500 and 4,800 pixels wide.
+- **Tests.** 204 Swift tests and 54 Python tests pass, 2 of them new for `coreml_io.py`.
+
+**Found along the way:**
+- **Core Image's scaling is not deterministic on this Mac.** In three runs of the unchanged code, 4–11 of 200 frames were scaled by a second, slightly different method. It applies across the whole frame, at about 1 level on average and up to 44 at edges, probably when its half-float intermediate is not available under memory pressure. Detections then shift slightly (60 against 58 on one frame). Core ML and the decoding are deterministic.
+  - A fixed area downscale, the cv2 INTER_AREA that `evaluate.py` uses, would remove this and the GPU step (2.7 ms).
+  - It is not done, because it changes the detector's input slightly.
+- **Most text reads repeat themselves.** On a Solo match, 92% of reserve-counter reads, 77% of readout reads and 53% of slot-count reads returned the value read before, because the map moving behind the HUD changes their fingerprints.
+  - Some of these repeats fix misreads: Vision reads one counter's "909" as "606" on most frames of a Duo match, and a re-read on new pixels gets it right. So the reads stay as they are.
+  - A change that skipped only the readout and slot-count repeats saved about 7% of reading time and was not kept.
+- **Vision shares the Neural Engine with the detector.** Before the change, the model took 7.8–8.3 ms with reads running against 7.7 ms without.
+
+**Not checked live:** frames per second in a match with the game running, and whether the CPU and Neural Engine time saved shows in the game's own frame rate.
+
+**Reproduce** (the timing mode copies each frame into a capture-style buffer first, untimed):
+
+```sh
+.build/release/ZombsPerceive <session> --model <artifacts> --icons icons.json --frames 0:299 --benchmark [--no-text]
+.build/release/ZombsPerceive <session> --model <artifacts> --compare-model <other artifacts> --frames 0:149
+python3 tools/compare_replays.py before.jsonl after.jsonl
+```
+
 ## Opponents out of view, bullets, and the gun carried, October 14
 
 You asked for three things:
@@ -475,7 +523,7 @@ Both models were trained on Kaggle (T4) and evaluated with `evaluate.py` at thre
 
 On validation, `player` AP50 rose from 0.096 to 0.340.
 
-The Oct 9 model is installed as the beta detector, as `artifacts/solo-pilot-2026-10-09-960x768`: the same weights as `artifacts/solo-pilot-2026-10-09`, exported at 960 × 768 so that the whole model runs on the Neural Engine (per-frame detection 12 ms instead of 25–27 ms when replaying recordings). On 511 frames from five matches at all three recorded window sizes it keeps 97.1–99.7% of the square export's detections in every class at the same thresholds; on the test split its AP50 is equal or higher in every class. Its per-class thresholds come from `evaluate.py --calibrate-thresholds` on the square export, except `player`, which is set to 0.55 (see DATA_WORKFLOW §6). With 3 test and 5 validation players these numbers are very uncertain. The app does not need the self-player class; your position is the screen center.
+The Oct 9 model is installed as the beta detector, as `artifacts/solo-pilot-2026-10-09-960x768` (since October 14 as its float16 rewrite, `artifacts/solo-pilot-2026-10-09-960x768-fp16io`, with the same outputs; see Faster frames): the same weights as `artifacts/solo-pilot-2026-10-09`, exported at 960 × 768 so that the whole model runs on the Neural Engine (per-frame detection 12 ms instead of 25–27 ms when replaying recordings). On 511 frames from five matches at all three recorded window sizes it keeps 97.1–99.7% of the square export's detections in every class at the same thresholds; on the test split its AP50 is equal or higher in every class. Its per-class thresholds come from `evaluate.py --calibrate-thresholds` on the square export, except `player`, which is set to 0.55 (see DATA_WORKFLOW §6). With 3 test and 5 validation players these numbers are very uncertain. The app does not need the self-player class; your position is the screen center.
 
 ### Still open for the beta
 
@@ -507,7 +555,7 @@ The running packaged app is the capture/recorder build verified above. The lates
 
 - Annotate the collected Solo gameplay and collect/annotate Duo and Squad. Only the 35-frame Solo pilot model has been trained; no release-candidate model exists.
 - Calibrate HUD regions, templates, item behavior, and team identification against recordings.
-- Measure the complete recognition pipeline against the 20 Hz and 100 ms p95 targets. Preview performance without a model cannot establish this result.
+- Measure the complete recognition pipeline against the 20 Hz and 100 ms p95 targets in a live match. Replays meet them (8–9 ms per frame, see Faster frames); live capture and the game's load have not been measured.
 - Verify native inputs in supervised gameplay, including aim coordinates, manual override, emergency stop, focus loss, and the absence of movement, door, chest, or revive actions.
 - Run replay and supervised acceptance across all three modes. The complete release criteria have not passed.
 

@@ -140,15 +140,26 @@ def mask_iou(raw, proto, anchor, box, polygon, geometry, size, threshold):
 def core_ml_predictor(package: Path):
     """Run the exported package on every compute unit, as the app configures it."""
     import coremltools as ct
+    import numpy as np
     from PIL import Image
     model = ct.models.MLModel(str(package.resolve()), compute_units=ct.ComputeUnit.ALL)
-    name = next(i.name for i in model.get_spec().description.input if i.type.WhichOneof("Type") == "imageType")
+    spec = model.get_spec()
+    (inp,) = spec.description.input
+    if inp.type.WhichOneof("Type") == "imageType":
+        def feed(canvas):
+            return {inp.name: Image.fromarray(canvas)}
+    else:
+        # A coreml_io.py export takes the float16 RGB planes Detector.swift computes: float16(float32(v) * scale).
+        scale = np.float32(float(spec.description.metadata.userDefined["zombs.inputScale"]))
+
+        def feed(canvas):
+            return {inp.name: (canvas.astype(np.float32) * scale).astype(np.float16).transpose(2, 0, 1)[None]}
 
     def predict(canvas):
-        outputs = list(model.predict({name: Image.fromarray(canvas)}).values())
+        outputs = list(model.predict(feed(canvas)).values())
         raw = next(o for o in outputs if o.ndim == 3 and o.shape[1] == 4 + len(LABELS) + 32)
         proto = next(o for o in outputs if o.ndim == 4 and o.shape[1] == 32)
-        return raw[0], proto[0]
+        return raw[0].astype(np.float32), proto[0].astype(np.float32)
     return predict
 
 

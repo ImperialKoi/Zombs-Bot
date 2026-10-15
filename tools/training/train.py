@@ -17,6 +17,7 @@ from dataset import LABELS, tree_hash
 # 18,900 anchors exceed the Neural Engine's 16,384 and put the head on the GPU beside the game. Its detections
 # match the square export's at the same thresholds (97-99.7% per class over 511 frames). 960 x 512 is faster
 # (6-7 ms) but lowers confidences, since training letterboxes to 960 x 960. Multiples of 128 run fastest.
+# coreml_io.py then gives the export float16 input and outputs, with the same numbers: 4.5 ms instead of 9 ms.
 INPUT_HEIGHT = 768
 
 
@@ -58,15 +59,23 @@ def fit(dataset: Path, output: Path, epochs: int = 100, size: int = 960, device=
 
 
 def check_runtime_layout(package: Path, size: int, height: int | None = None) -> None:
-    """Refuse an export whose input or raw outputs differ from what Detector.swift decodes."""
+    """Refuse an export whose input or raw outputs differ from what Detector.swift decodes: an RGB image, or the
+    float16 RGB planes of a coreml_io.py rewrite with its input scale."""
     import coremltools as ct
     spec = ct.models.MLModel(str(package.resolve()), skip_model_load=True).get_spec()
-    images = [(i.type.imageType.width, i.type.imageType.height) for i in spec.description.input
-              if i.type.WhichOneof("Type") == "imageType"]
+    inputs = []
+    for i in spec.description.input:
+        kind = i.type.WhichOneof("Type")
+        if kind == "imageType":
+            inputs.append((i.type.imageType.width, i.type.imageType.height))
+        elif kind == "multiArrayType" and "zombs.inputScale" in spec.description.metadata.userDefined:
+            shape = list(i.type.multiArrayType.shape)
+            if len(shape) == 4 and shape[:2] == [1, 3]:
+                inputs.append((shape[3], shape[2]))
     shapes = [list(o.type.multiArrayType.shape) for o in spec.description.output]
-    if (images != [(size, height or size)] or not any(len(s) == 3 and s[1] == 4 + len(LABELS) + 32 for s in shapes)
+    if (inputs != [(size, height or size)] or not any(len(s) == 3 and s[1] == 4 + len(LABELS) + 32 for s in shapes)
             or not any(len(s) == 4 and s[1] == 32 for s in shapes)):
-        raise RuntimeError(f"Core ML layout does not match the runtime decoder: inputs {images}, outputs {shapes}")
+        raise RuntimeError(f"Core ML layout does not match the runtime decoder: inputs {inputs}, outputs {shapes}")
 
 
 def check_provenance(weights: Path, report_file: Path) -> dict:
@@ -82,6 +91,7 @@ def check_provenance(weights: Path, report_file: Path) -> dict:
 def export(weights: Path, dataset: Path, output: Path, height: int = INPUT_HEIGHT) -> None:
     """Export a fitted checkpoint to the runtime's fixed-shape raw Core ML layout with its manifest."""
     from ultralytics import YOLO
+    import coreml_io  # Local only: the Kaggle kernel imports this file without it.
     report_file = dataset.parent / "split-report.json"
     report = json.loads(report_file.read_text())
     scope = require_trainable(report)
@@ -96,7 +106,10 @@ def export(weights: Path, dataset: Path, output: Path, height: int = INPUT_HEIGH
     if height % 32 or not 160 <= height <= size:
         raise SystemExit(f"Input height must be a multiple of 32 between 160 and the training size {size}")
     output.mkdir(parents=True, exist_ok=True)
-    shutil.move(trained.export(format="coreml", imgsz=[height, size], half=True, nms=False, dynamic=False), destination)
+    exported = Path(trained.export(format="coreml", imgsz=[height, size], half=True, nms=False, dynamic=False))
+    check_runtime_layout(exported, size, height)
+    coreml_io.rewrite(exported, destination)
+    shutil.rmtree(exported)
     check_runtime_layout(destination, size, height)
     shutil.copy2(weights.parent / "training.json", output / "training.json")
     manifest = dict(modelFile=destination.name, modelSHA256=tree_hash(destination), inputSize=size, inputHeight=height,

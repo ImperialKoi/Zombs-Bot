@@ -1,4 +1,5 @@
 import Foundation
+import Accelerate
 import CoreML
 import CoreImage
 import CryptoKit
@@ -106,8 +107,22 @@ public final class SceneDetector: @unchecked Sendable {
     /// Reused IOSurface input buffers: no per-frame allocation, and Core ML reads them without a copy.
     private let inputs: CVPixelBufferPool
     private let background: CIImage
+    /// A model exported by `coreml_io.py` takes float16 RGB planes instead of an image. Core ML turns an image input into
+    /// float32 on the CPU, where the program then also scales and casts it, and casts the outputs back to float32: about a
+    /// third of each prediction on an M1. Here the planes come from the same scaled frame with the same arithmetic, so
+    /// the outputs are the same numbers and the whole program runs on the Neural Engine.
+    private let tensor: MLMultiArray?
+    /// Each channel byte `v` as the bits of float16(float32(v) * scale), the exported program's scale and rounding.
+    private let halfTable: [UInt16]
+    /// Blue, green, red and the unused byte of the scaled frame, split apart before the table maps them.
+    private var planes: [vImage_Buffer] = []
+    /// Reused output buffers, for float16 outputs.
+    private var backings: MLPredictionOptions?
     /// The latest prediction's input, valid until the next prediction.
     public private(set) var lastInput: ModelInput?
+    /// The latest prediction's steps, in milliseconds: scaling the frame into the input, converting it to the model's
+    /// float16 planes (when it takes them), the model, and reading its outputs.
+    public private(set) var lastTimings = (render: 0.0, convert: 0.0, model: 0.0, decode: 0.0)
     public static let requiredLabels: Set<String> = ["self_player","player","ally_marker","enemy_marker","ground_item","door","chest","wall","rock","tree","revive_target"]
 
     public init(artifacts: URL) throws {
@@ -126,10 +141,39 @@ public final class SceneDetector: @unchecked Sendable {
         let compiled = url.pathExtension == "mlmodelc" ? url : try MLModel.compileModel(at:url)
         let config = MLModelConfiguration(); config.computeUnits = .all
         model = try MLModel(contentsOf:compiled, configuration:config)
-        guard let input = model.modelDescription.inputDescriptionsByName.first(where: { $0.value.type == .image }),
-              input.value.imageConstraint?.pixelsWide == inputWidth,
-              input.value.imageConstraint?.pixelsHigh == inputHeight else { throw ModelError.invalid("Expected a fixed \(inputWidth)×\(inputHeight) image input") }
-        inputName = input.key
+        let described = model.modelDescription.inputDescriptionsByName
+        if let input = described.first(where: { $0.value.type == .image }),
+           input.value.imageConstraint?.pixelsWide == inputWidth, input.value.imageConstraint?.pixelsHigh == inputHeight {
+            inputName = input.key; tensor = nil; halfTable = []
+        } else if let input = described.first(where: { $0.value.type == .multiArray }),
+                  let constraint = input.value.multiArrayConstraint, constraint.dataType == .float16,
+                  constraint.shape.map(\.intValue) == [1, 3, inputHeight, inputWidth],
+                  let scale = (model.modelDescription.metadata[.creatorDefinedKey] as? [String: String])?["zombs.inputScale"].flatMap(Float.init) {
+            inputName = input.key
+            halfTable = (0..<256).map { Float16(Float($0) * scale).bitPattern }
+            // An IOSurface the Neural Engine reads directly, without Core ML copying the planes first.
+            var surface: CVPixelBuffer?
+            guard CVPixelBufferCreate(nil, inputWidth, 3 * inputHeight, kCVPixelFormatType_OneComponent16Half,
+                                      [kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()] as CFDictionary, &surface) == kCVReturnSuccess,
+                  let surface else { throw ModelError.invalid("Cannot allocate model input") }
+            tensor = MLMultiArray(pixelBuffer: surface, shape: [1, 3, inputHeight, inputWidth].map { NSNumber(value: $0) })
+            planes = try (0..<4).map { _ in try vImage_Buffer(width: inputWidth, height: inputHeight, bitsPerPixel: 8) }
+        } else {
+            throw ModelError.invalid("Expected a fixed \(inputWidth)×\(inputHeight) image input, or float16 [1, 3, \(inputHeight), \(inputWidth)] planes")
+        }
+        // Float16 outputs go straight into reused IOSurfaces instead of new arrays each prediction.
+        var arrays: [String: Any] = [:]
+        for (name, output) in model.modelDescription.outputDescriptionsByName {
+            guard let constraint = output.multiArrayConstraint, constraint.dataType == .float16, let last = constraint.shape.last?.intValue else { continue }
+            var surface: CVPixelBuffer?
+            guard CVPixelBufferCreate(nil, last, constraint.shape.dropLast().reduce(1) { $0 * $1.intValue }, kCVPixelFormatType_OneComponent16Half,
+                                      [kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any]()] as CFDictionary, &surface) == kCVReturnSuccess,
+                  let surface else { continue }
+            arrays[name] = MLMultiArray(pixelBuffer: surface, shape: constraint.shape)
+        }
+        if arrays.count == model.modelDescription.outputDescriptionsByName.count {
+            let options = MLPredictionOptions(); options.outputBackings = arrays; backings = options
+        }
         let attributes: [String: Any] = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
                                          kCVPixelBufferWidthKey as String: inputWidth, kCVPixelBufferHeightKey as String: inputHeight,
                                          kCVPixelBufferIOSurfacePropertiesKey as String: [String: Any](),
@@ -143,12 +187,38 @@ public final class SceneDetector: @unchecked Sendable {
         validationReason = validated ? (report?.passed == true ? "Model and supervised acceptance passed" : "Detection evaluation passed; supervised gameplay acceptance is still required")
             : "Beta: \(manifest.scope ?? "unvalidated") detector without held-out results in all three modes"
     }
+    deinit { planes.forEach { $0.free() } }
+
+    /// Fills the float16 input from the scaled BGRA frame: the RGB planes Core ML and the program's first two operations
+    /// would have made of it.
+    private func fill(_ tensor: MLMultiArray, from buffer: CVPixelBuffer) throws {
+        guard CVPixelBufferLockBaseAddress(buffer, .readOnly) == kCVReturnSuccess else { throw ModelError.invalid("Cannot read model input") }
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        let width = CVPixelBufferGetWidth(buffer), height = CVPixelBufferGetHeight(buffer)
+        var source = vImage_Buffer(data: CVPixelBufferGetBaseAddress(buffer), height: vImagePixelCount(height), width: vImagePixelCount(width),
+                                   rowBytes: CVPixelBufferGetBytesPerRow(buffer))
+        // In memory each pixel is blue, green, red, unused: the function's A, R, G, B.
+        guard vImageConvert_ARGB8888toPlanar8(&source, &planes[2], &planes[1], &planes[0], &planes[3], vImage_Flags(kvImageNoFlags)) == kvImageNoError
+        else { throw ModelError.invalid("Cannot convert model input") }
+        var converted = true
+        tensor.withUnsafeMutableBytes { bytes, strides in
+            halfTable.withUnsafeBufferPointer { table in
+                for c in 0..<3 {
+                    var plane = vImage_Buffer(data: bytes.baseAddress! + c * strides[1] * 2, height: vImagePixelCount(height), width: vImagePixelCount(width),
+                                              rowBytes: strides[2] * 2)
+                    converted = converted && vImageLookupTable_Planar8toPlanar16(&planes[c], &plane, table.baseAddress!, vImage_Flags(kvImageNoFlags)) == kvImageNoError
+                }
+            }
+        }
+        guard converted else { throw ModelError.invalid("Cannot convert model input") }
+    }
 
     /// - Parameter image: the viewport (the image's extent origin must be zero).
     public func predict(_ image: CIImage) throws -> [Detection] {
         let (inputWidth, inputHeight) = manifest.inputPixels
         let width = Double(image.extent.width), height = Double(image.extent.height)
         guard width > 0, height > 0 else { return [] }
+        let started = ProcessInfo.processInfo.systemUptime
         var buffer: CVPixelBuffer?
         guard CVPixelBufferPoolCreatePixelBuffer(nil, inputs, &buffer) == kCVReturnSuccess, let buffer else { throw ModelError.invalid("Cannot allocate model input") }
         let scale = min(Double(inputWidth)/width,Double(inputHeight)/height)
@@ -157,19 +227,55 @@ public final class SceneDetector: @unchecked Sendable {
         let resized = image.transformed(by:CGAffineTransform(scaleX:scale,y:scale)).transformed(by:CGAffineTransform(translationX:padX,y:padY))
         context.render(resized.composited(over:background),to:buffer)
         lastInput = ModelInput(buffer: buffer, content: CGRect(x: padX, y: padY, width: width * scale, height: height * scale))
-        let input = try MLDictionaryFeatureProvider(dictionary:[inputName:MLFeatureValue(pixelBuffer:buffer)])
-        let result = try model.prediction(from:input)
+        let scaled = ProcessInfo.processInfo.systemUptime
+        let feature: MLFeatureValue
+        if let tensor { try fill(tensor, from: buffer); feature = MLFeatureValue(multiArray: tensor) }
+        else { feature = MLFeatureValue(pixelBuffer: buffer) }
+        let rendered = ProcessInfo.processInfo.systemUptime
+        let input = try MLDictionaryFeatureProvider(dictionary:[inputName:feature])
+        let result = try backings.map { try model.prediction(from: input, options: $0) } ?? model.prediction(from:input)
+        let predicted = ProcessInfo.processInfo.systemUptime
         let arrays = result.featureNames.compactMap { result.featureValue(for:$0)?.multiArrayValue }
         let classes = manifest.labels.count
         guard let boxes = arrays.first(where: { $0.shape.count == 3 && $0.shape[1].intValue == 4 + classes + 32 }),
               let proto = arrays.first(where: { $0.shape.count == 4 && $0.shape[1].intValue == 32 }) else { throw ModelError.invalid("Expected raw YOLO11 segmentation outputs; export with nms=False") }
-        let raw = DenseArray(boxes), prototypes = DenseArray(proto)
-        let count = boxes.shape[2].intValue
+        // Scoped access: an output written into an IOSurface stays locked after `dataPointer`, and could not be reused.
+        let geometry = Letterbox(width: width, height: height, scale: scale, padX: padX, padY: padY, inputWidth: inputWidth, inputHeight: inputHeight)
+        let detections = boxes.withUnsafeBytes { b in proto.withUnsafeBytes { p in
+            decode(DenseArray(boxes, b.baseAddress!), DenseArray(proto, p.baseAddress!), anchors: boxes.shape[2].intValue,
+                   prototypeSize: (proto.shape[2].intValue, proto.shape[3].intValue), geometry)
+        } }
+        let done = ProcessInfo.processInfo.systemUptime
+        lastTimings = ((scaled - started) * 1000, (rendered - scaled) * 1000, (predicted - rendered) * 1000, (done - predicted) * 1000)
+        return detections
+    }
+    /// Where the frame sits in the model input.
+    struct Letterbox { var width, height, scale, padX, padY: Double; var inputWidth, inputHeight: Int }
+
+    /// Detections from the raw outputs: the best class per anchor, class-aware NMS, and mask cells for obstacles.
+    private func decode(_ raw: DenseArray, _ prototypes: DenseArray, anchors count: Int, prototypeSize: (height: Int, width: Int), _ g: Letterbox) -> [Detection] {
+        let classes = manifest.labels.count
+        let (width, height, scale, padX, padY) = (g.width, g.height, g.scale, g.padX, g.padY)
         // Best class per anchor, scanning each class row contiguously.
         var bestScore = [Double](repeating: 0, count: count), bestClass = [Int](repeating: 0, count: count)
-        for c in 0..<classes { for i in 0..<count {
-            let p = raw.value(0, 4 + c, i)
-            if p > bestScore[i] { bestScore[i] = p; bestClass[i] = c }
+        bestScore.withUnsafeMutableBufferPointer { score in bestClass.withUnsafeMutableBufferPointer { best in
+            var start = 0
+            if let halves = raw.halves, raw.s2 == 1 {
+                // Eight anchors at a time. Each lane keeps the first class with the highest score, as the loop below does.
+                while start + 8 <= count {
+                    var top = SIMD8<Float16>(repeating: 0), which = SIMD8<Int16>(repeating: 0)
+                    for c in 0..<classes {
+                        let p = UnsafeRawPointer(halves + (4 + c) * raw.s1 + start).loadUnaligned(as: SIMD8<Float16>.self)
+                        let better = p .> top
+                        top.replace(with: p, where: better); which.replace(with: Int16(c), where: better)
+                    }
+                    for k in 0..<8 { score[start + k] = Double(top[k]); best[start + k] = Int(which[k]) }
+                    start += 8
+                }
+            }
+            for c in 0..<classes { raw.row(4 + c, from: start, count: count) { i, p in
+                if p > score[i] { score[i] = p; best[i] = c }
+            } }
         } }
         let floor = min(manifest.detectorThreshold, manifest.classThresholds?.values.min() ?? 1)
         var candidates: [(Detection,Int)] = []
@@ -192,23 +298,28 @@ public final class SceneDetector: @unchecked Sendable {
             if kept.count == 100 { break }
         }
         let obstacleLabels: Set<String> = ["wall","rock","tree","door","chest"]
-        let ph = proto.shape[2].intValue, pw = proto.shape[3].intValue
+        let (ph, pw) = prototypeSize, grid = 12
+        var offsets = [Int](repeating: 0, count: grid * grid), logits = [Double](repeating: 0, count: grid * grid)
         return kept.map { detection,index in
             var detection=detection
-            if obstacleLabels.contains(detection.label) {
-                let coefficients=(0..<32).map { raw.value(0,4+classes+$0,index) }
-                let b=detection.bounds, grid=12
-                for row in 0..<grid { for col in 0..<grid {
-                    let x=b.x+b.width*(Double(col)+0.5)/Double(grid), y=b.y+b.height*(Double(row)+0.5)/Double(grid)
-                    let px=min(pw-1,max(0,Int((x*width*scale+padX)/Double(inputWidth)*Double(pw))))
-                    let py=min(ph-1,max(0,Int((y*height*scale+padY)/Double(inputHeight)*Double(ph))))
-                    var logit=0.0
-                    for k in 0..<32 { logit += coefficients[k]*prototypes.value(0,k,py,px) }
-                    if 1/(1+exp(-logit)) >= manifest.maskThreshold {
-                        detection.maskCells.append(Rect(b.x+b.width*Double(col)/Double(grid),b.y+b.height*Double(row)/Double(grid),b.width/Double(grid),b.height/Double(grid)))
-                    }
-                } }
+            guard obstacleLabels.contains(detection.label) else { return detection }
+            let b=detection.bounds
+            for row in 0..<grid { for col in 0..<grid {
+                let x=b.x+b.width*(Double(col)+0.5)/Double(grid), y=b.y+b.height*(Double(row)+0.5)/Double(grid)
+                let px=min(pw-1,max(0,Int((x*width*scale+padX)/Double(g.inputWidth)*Double(pw))))
+                let py=min(ph-1,max(0,Int((y*height*scale+padY)/Double(g.inputHeight)*Double(ph))))
+                offsets[row*grid+col] = py*prototypes.s2 + px*prototypes.s3
+            } }
+            // Each cell's logit sums its 32 terms in order, as before, but one prototype plane at a time: the planes are
+            // 92 KB apart, so going through them cell by cell missed the cache on almost every read.
+            for cell in logits.indices { logits[cell] = 0 }
+            for k in 0..<32 {
+                let coefficient = raw.value(0,4+classes+k,index), plane = k*prototypes.s1
+                for cell in logits.indices { logits[cell] += coefficient*prototypes.read(plane+offsets[cell]) }
             }
+            for row in 0..<grid { for col in 0..<grid where 1/(1+exp(-logits[row*grid+col])) >= manifest.maskThreshold {
+                detection.maskCells.append(Rect(b.x+b.width*Double(col)/Double(grid),b.y+b.height*Double(row)/Double(grid),b.width/Double(grid),b.height/Double(grid)))
+            } }
             return detection
         }
     }
@@ -221,26 +332,36 @@ public final class SceneDetector: @unchecked Sendable {
 /// Typed, stride-aware reads from a model output without per-element bridging.
 struct DenseArray {
     let pointer: UnsafeMutableRawPointer
-    /// Set for float32 outputs, the usual case, so reads skip the type dispatch.
+    /// Set for float32 and float16 outputs, the usual cases, so reads skip the type dispatch.
     let floats: UnsafeMutablePointer<Float>?
+    let halves: UnsafeMutablePointer<Float16>?
     let s0: Int, s1: Int, s2: Int, s3: Int
     let type: MLMultiArrayDataType
     let array: MLMultiArray
-    init(_ array: MLMultiArray) {
-        self.array = array; pointer = array.dataPointer; type = array.dataType
+    /// - Parameter base: the array's bytes, valid while the caller's `withUnsafeBytes` lasts.
+    init(_ array: MLMultiArray, _ base: UnsafeRawPointer) {
+        self.array = array; pointer = UnsafeMutableRawPointer(mutating: base); type = array.dataType
         floats = type == .float32 ? pointer.assumingMemoryBound(to: Float.self) : nil
+        halves = type == .float16 ? pointer.assumingMemoryBound(to: Float16.self) : nil
         let strides = array.strides.map(\.intValue) + [0, 0, 0, 0]
         s0 = strides[0]; s1 = strides[1]; s2 = strides[2]; s3 = strides[3]
     }
     @inline(__always) func read(_ offset: Int) -> Double {
         if let floats { return Double(floats[offset]) }
+        if let halves { return Double(halves[offset]) }
         switch type {
-        case .float16: return Double(pointer.assumingMemoryBound(to: Float16.self)[offset])
         case .double: return pointer.assumingMemoryBound(to: Double.self)[offset]
         default: return array[offset].doubleValue
         }
     }
     @inline(__always) func value(_ a: Int, _ b: Int, _ c: Int) -> Double { read(a * s0 + b * s1 + c * s2) }
+    /// Values `from..<count` of row `b` of a [1, B, N] array, without the per-value type dispatch.
+    @inline(__always) func row(_ b: Int, from first: Int = 0, count: Int, _ body: (Int, Double) -> Void) {
+        let start = b * s1
+        if let halves { for i in first..<count { body(i, Double(halves[start + i * s2])) } }
+        else if let floats { for i in first..<count { body(i, Double(floats[start + i * s2])) } }
+        else { for i in first..<count { body(i, read(start + i * s2)) } }
+    }
     @inline(__always) func value(_ a: Int, _ b: Int, _ c: Int, _ d: Int) -> Double { read(a * s0 + b * s1 + c * s2 + d * s3) }
 }
 

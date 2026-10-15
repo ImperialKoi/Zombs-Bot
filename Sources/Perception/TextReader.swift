@@ -48,6 +48,8 @@ public final class TextReader: @unchecked Sendable {
     public let synchronous: Bool
     public var minimumInterval = 0.12
     public private(set) var reads = 0
+    /// Reads made and milliseconds spent, by kind of region, for diagnostics.
+    public private(set) var readsByKind: [String: (count: Int, milliseconds: Double)] = [:]
 
     public init(synchronous: Bool = false) { self.synchronous = synchronous }
 
@@ -86,8 +88,9 @@ public final class TextReader: @unchecked Sendable {
         lock.unlock()
         guard let image = image() else { return }
         if synchronous {
+            let start = ProcessInfo.processInfo.systemUptime
             let lines = Self.recognize(image)
-            lock.lock(); results[region] = TextResult(lines: lines, fingerprint: fingerprint, time: time); reads += 1; lock.unlock()
+            lock.lock(); results[region] = TextResult(lines: lines, fingerprint: fingerprint, time: time); count(region, since: start); lock.unlock()
             return
         }
         lock.lock()
@@ -105,9 +108,26 @@ public final class TextReader: @unchecked Sendable {
                 running = false; lock.unlock(); return
             }
             lock.unlock()
+            let start = ProcessInfo.processInfo.systemUptime
             let lines = Self.recognize(job.image)
-            lock.lock(); results[region] = TextResult(lines: lines, fingerprint: job.fingerprint, time: job.time); reads += 1; lock.unlock()
+            lock.lock(); results[region] = TextResult(lines: lines, fingerprint: job.fingerprint, time: job.time); count(region, since: start); lock.unlock()
         }
+    }
+
+    /// Call with the lock held.
+    private func count(_ region: TextRegion, since start: Double) {
+        reads += 1
+        let kind: String
+        switch region {
+        case .prompt: kind = "prompt"
+        case .readout: kind = "readout"
+        case .roster: kind = "roster"
+        case .slot: kind = "slot"
+        case .reserve: kind = "reserve"
+        case .nameTag: kind = "nameTag"
+        }
+        let old = readsByKind[kind] ?? (0, 0)
+        readsByKind[kind] = (old.count + 1, old.milliseconds + (ProcessInfo.processInfo.systemUptime - start) * 1000)
     }
 
     /// Accurate recognition without language correction: HUD text is names and numbers.

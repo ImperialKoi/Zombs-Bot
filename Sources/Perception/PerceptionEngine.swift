@@ -35,6 +35,8 @@ public struct PerceptionResult {
 
 /// The rounds found on another thread, handed back once it is done.
 private final class BulletScan: @unchecked Sendable { var sightings: [BulletSighting] = []; var milliseconds = 0.0 }
+/// The detector's raw detections, made on its own queue while the HUD is read.
+private final class SceneScan: @unchecked Sendable { var detections: Result<[Detection], Error> = .success([]); var input: ModelInput? }
 
 /// Turns one viewport frame into an observation. HUD values come from pixels; text is read
 /// asynchronously and used only while it still matches the pixels on screen.
@@ -46,6 +48,7 @@ public final class PerceptionEngine {
     public var settings: PerceptionSettings
     public private(set) var layout: HUDLayout?
     private let tracker = SceneTracker()
+    private let detection = DispatchQueue(label: "perception.detector", qos: .userInteractive)
     private let bulletDetector = BulletDetector()
     private var bulletTracker = BulletTracker()
     private var affiliation = AffiliationTracker()
@@ -98,6 +101,23 @@ public final class PerceptionEngine {
         guard let layout else {
             result.problems.append("HUD not found: start a match with the inventory visible")
             return result
+        }
+        // In a match the detector (GPU and Neural Engine) and the search for rounds (another core) start before the HUD is
+        // read on this thread. Whether you are in a match only needs the inventory anchor, which the HUD read checks first.
+        let inMatch = layout.anchorVisible(in: image) || t - lastAlive <= 0.3
+        let detectStart = ProcessInfo.processInfo.systemUptime
+        let scene = SceneScan(), rounds = BulletScan(), group = DispatchGroup()
+        if inMatch {
+            if let detector, let ciImage {
+                detection.async(group: group) {
+                    scene.detections = Result { try detector.predict(ciImage) }; scene.input = detector.lastInput
+                }
+            }
+            DispatchQueue.global(qos: .userInteractive).async(group: group) { [bulletDetector] in
+                let start = ProcessInfo.processInfo.systemUptime
+                rounds.sightings = bulletDetector.detect(image)
+                rounds.milliseconds = (ProcessInfo.processInfo.systemUptime - start) * 1000
+            }
         }
         var hud = HUDReader.read(image, layout: layout)
         for i in hud.roster.indices {
@@ -210,32 +230,29 @@ public final class PerceptionEngine {
         result.hudMilliseconds = (ProcessInfo.processInfo.systemUptime - started) * 1000
 
         // Scene objects.
-        let detectStart = ProcessInfo.processInfo.systemUptime
         var detections: [Detection] = []
+        group.wait()
         if alive {
             let hudPixels = layout.exclusions(rosterRows: hud.rosterRows, prompt: hud.promptRect)
-            // Rounds in flight are looked for on another core while the detector runs on the Neural Engine.
-            let rounds = BulletScan()
-            let group = DispatchGroup()
-            DispatchQueue.global(qos: .userInteractive).async(group: group) { [bulletDetector] in
-                let start = ProcessInfo.processInfo.systemUptime
-                rounds.sightings = bulletDetector.detect(image, excluding: hudPixels)
-                rounds.milliseconds = (ProcessInfo.processInfo.systemUptime - start) * 1000
-            }
-            if let detector, let ciImage {
+            if detector != nil && ciImage != nil {
                 do {
                     let exclusions = hudPixels.map(layout.normalized)
-                    let raw = try detector.predict(ciImage).filter { d in !exclusions.contains { $0.contains(d.bounds.center) } }
-                    result.detectorInput = detector.lastInput
+                    let raw = try scene.detections.get().filter { d in !exclusions.contains { $0.contains(d.bounds.center) } }
+                    result.detectorInput = scene.input
                     detections = tracker.update(Self.mergingDuplicatePlayers(Self.excludingYourself(raw, aspect: o.aspect)), at: t, aspect: o.aspect)
                     o.sceneryShift = tracker.shift; o.ownVelocity = tracker.ownVelocity
                 } catch {
                     o.captureHealthy = false; result.problems.append(error.localizedDescription)
                 }
             }
-            group.wait()
-            result.bulletSightings = rounds.sightings; result.bulletMilliseconds = rounds.milliseconds
-            o.bullets = bulletTracker.update(time: t, aspect: o.aspect, sceneryShift: o.sceneryShift, ownVelocity: o.ownVelocity, sightings: rounds.sightings)
+            // Rounds over the HUD are left out, as the search would have left them out itself.
+            let width = Double(image.width), height = Double(image.height)
+            result.bulletSightings = rounds.sightings.filter { s in
+                let px = s.position.x * width, py = s.position.y * height
+                return !hudPixels.contains { $0.contains(px, py) }
+            }
+            result.bulletMilliseconds = rounds.milliseconds
+            o.bullets = bulletTracker.update(time: t, aspect: o.aspect, sceneryShift: o.sceneryShift, ownVelocity: o.ownVelocity, sightings: result.bulletSightings)
         } else { bulletTracker.reset() }
         result.detectorMilliseconds = (ProcessInfo.processInfo.systemUptime - detectStart) * 1000
         for d in detections {
