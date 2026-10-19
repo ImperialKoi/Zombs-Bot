@@ -1,5 +1,7 @@
 # Annotations guide
 
+> **Annotation ended on 2026-10-19.** The corpus, its frames and the queue below were deleted after the final training. See [DATA_WORKFLOW §2](DATA_WORKFLOW.md#2-review-annotations-locally). The class rules stay here for any future round.
+
 How to annotate ZombsRoyale frames for the detector. This is written for the annotating agent and for anyone checking its work. It replaces the class notes scattered across other docs; where they disagree, this guide wins.
 
 ## The job
@@ -46,19 +48,25 @@ It starts with:
 - green ammo-symbol boxes;
 - wrapped presents;
 - yellow X boxes;
-- red star-emblem boxes.
+- red star-emblem boxes;
+- snow-covered crates (contrast: bare, non-opening crates stay `rock`).
 
 **Cover you have confirmed as `rock`:**
 - stones, including the round blue/pink-centred Mystic Forest stones;
-- crates and barrels that don't open;
+- crates and barrels that don't open, including the N-barrel stacked-barrel crate (confirmed 2026-10-15);
 - benches, tables and other furniture;
 - tents, rope fences, silver pedestals, coloured circular pads, solid window props, boats;
+- snowmen (confirmed 2026-10-15); purple round objects (confirmed 2026-10-15);
 - the large orange four-petal-emblem box;
 - brown skull-and-crossbones boxes.
 
 **Vegetation you have confirmed as `tree`:** trees, bushes (including small light-green bushes, blueberry bushes and snowy red/purple bushes), hedges, thorn plants and purple Mystic flowers.
 
-**Excluded, by your confirmation:** large blue skull-pattern rectangles inside buildings are floor rugs.
+**Excluded, by your confirmation:** large blue skull-pattern rectangles inside buildings are floor rugs; the yellow lattice pad is just background (2026-10-15); the lava-vent plate is ignored too.
+
+**Never label, recently confirmed:** golden discs on the floor are `ground_item` not `rock` (2026-10-15).
+
+For any other sprite that fits no listed rule, ask the user — render a crop of it on its next appearance rather than guessing a class.
 
 ### Never label
 

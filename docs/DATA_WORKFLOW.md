@@ -34,6 +34,13 @@ None of the other tools download or upload media.
 
 ## 2. Review annotations locally
 
+> **Annotation ended on 2026-10-19.**
+> - The final model, `artifacts/final-2026-10-19`, was trained on 180 reviewed frames. It was not installed: on the test split it found 0 of 4 players, against 2 for the October 9 model.
+> - Every frame, video, annotation corpus and Kaggle copy was then deleted.
+> - Only small notes and reference outputs remain in `data/`.
+>
+> The workflow below still describes how to start again from new recordings.
+
 **Annotators: follow the [annotations guide](ANNOTATIONS_GUIDE.md).** It holds the class rules below plus every later confirmation, the workflow and the review cadence.
 
 The annotation server requires only Python's standard library:
@@ -195,7 +202,7 @@ Seed the library from recordings, then install it with a detector:
 ```sh
 bash scripts/swift.sh build -c release --product ZombsPerceive
 .build/release/ZombsPerceive data/recorder-corpus/2026-* --learn-icons artifacts/icons-seed.json
-bash scripts/install-artifacts.sh artifacts/solo-pilot-2026-10-09-960x768 artifacts/icons-seed.json
+bash scripts/install-artifacts.sh artifacts/solo-pilot-2026-10-09-960x768-fp16io artifacts/icons-seed.json
 ```
 
 `ZombsPerceive --decide` also runs the coordinator on recorded frames, as if each frame were live, and tallies what it would have done. `--hud-reviewed` compares vitals with hand readings. `--check-buffer-path` confirms that capture-buffer and decoded-image detections agree.

@@ -1,0 +1,116 @@
+{
+  "frames": [
+    {
+      "matchID": "2026-10-04T18-29-47Z-090BC4",
+      "image": "images/000848.jpg",
+      "timeSeconds": 18.482,
+      "split": "train",
+      "reason": "carried over"
+    },
+    {
+      "matchID": "2026-10-06T17-53-43Z-04E5BB",
+      "image": "images/000394.jpg",
+      "timeSeconds": 13.42,
+      "split": "val",
+      "reason": "carried over"
+    },
+    {
+      "matchID": "2026-10-06T18-35-48Z-E13D43",
+      "image": "images/000360.jpg",
+      "timeSeconds": 12.228,
+      "split": "test",
+      "reason": "carried over"
+    },
+    {
+      "matchID": "2026-10-04T18-32-13Z-ABF049",
+      "image": "images/000786.jpg",
+      "timeSeconds": 17.011,
+      "split": "train",
+      "reason": "carried over"
+    },
+    {
+      "matchID": "2026-10-04T18-33-52Z-7437EA",
+      "image": "images/000630.jpg",
+      "timeSeconds": 14.217,
+      "split": "train",
+      "reason": "carried over"
+    },
+    {
+      "matchID": "2026-10-04T18-44-20Z-8B2504",
+      "image": "images/001317.jpg",
+      "timeSeconds": 31.465,
+      "split": "train",
+      "reason": "carried over"
+    },
+    {
+      "matchID": "2026-10-04T18-47-58Z-21EE9A",
+      "image": "images/002345.jpg",
+      "timeSeconds": 59.911,
+      "split": "train",
+      "reason": "carried over"
+    },
+    {
+      "matchID": "2026-10-06T16-17-48Z-F0D994",
+      "image": "images/000456.jpg",
+      "timeSeconds": 15.623,
+      "split": "train",
+      "reason": "carried over"
+    },
+    {
+      "matchID": "2026-10-06T18-24-57Z-1678DA",
+      "image": "images/000330.jpg",
+      "timeSeconds": 11.203,
+      "split": "val",
+      "reason": "carried over"
+    },
+    {
+      "matchID": "2026-10-07T14-01-24Z-22C49B",
+      "image": "images/000425.jpg",
+      "timeSeconds": 14.403,
+      "split": "test",
+      "reason": "carried over"
+    },
+    {
+      "matchID": "2026-10-06T17-04-10Z-212F9A",
+      "image": "images/000489.jpg",
+      "timeSeconds": 17.212,
+      "split": "train",
+      "reason": "carried over"
+    },
+    {
+      "matchID": "2026-10-06T17-04-11Z-644390",
+      "image": "images/000795.jpg",
+      "timeSeconds": 27.023,
+      "split": "train",
+      "reason": "carried over"
+    },
+    {
+      "matchID": "2026-10-06T17-11-50Z-E7D441",
+      "image": "images/000430.jpg",
+      "timeSeconds": 14.622,
+      "split": "train",
+      "reason": "carried over"
+    },
+    {
+      "matchID": "2026-10-06T17-11-52Z-B0599C",
+      "image": "images/000228.jpg",
+      "timeSeconds": 7.827,
+      "split": "train",
+      "reason": "carried over"
+    },
+    {
+      "matchID": "2026-10-07T15-13-41Z-37F654",
+      "image": "images/000173.jpg",
+      "timeSeconds": 7.218,
+      "split": "val",
+      "reason": "carried over"
+    },
+    {
+      "matchID": "2026-10-04T00-18-24Z-E71586",
+      "image": "images/001262.jpg",
+      "timeSeconds": 34.596,
+      "split": "test",
+      "reason": "carried over"
+    }
+  ]
+}

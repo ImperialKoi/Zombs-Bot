@@ -93,7 +93,7 @@ The app stores recordings and configuration in:
 Install a trained detector and the seeded icon library with:
 
 ```sh
-bash scripts/install-artifacts.sh artifacts/solo-pilot-2026-10-09-960x768 artifacts/icons-seed.json
+bash scripts/install-artifacts.sh artifacts/solo-pilot-2026-10-09-960x768-fp16io artifacts/icons-seed.json
 ```
 
 ## First session
@@ -175,7 +175,7 @@ To rerun recognition on recorded frames and see what the assistant would do, use
 
 ```sh
 bash scripts/swift.sh build -c release --product ZombsPerceive
-.build/release/ZombsPerceive data/recorder-corpus/<match> --model artifacts/solo-pilot-2026-10-09-960x768 \
+.build/release/ZombsPerceive data/recorder-corpus/<match> --model artifacts/solo-pilot-2026-10-09-960x768-fp16io \
   --icons artifacts/icons-seed.json --decide --jsonl /tmp/frames.jsonl
 ```
 
